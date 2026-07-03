@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#F7F9FA" />
+
+    <!-- Set the theme class BEFORE first paint to avoid a flash of the wrong
+         theme. Mirrors ThemeProvider's logic (localStorage 'medhub-theme'). -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("medhub-theme") || "system";
+          var dark = t === "dark" || (t === "system" &&
+            window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          var root = document.documentElement;
+          root.classList.toggle("dark", dark);
+          root.style.colorScheme = dark ? "dark" : "light";
+        } catch (e) {}
+      })();
+    </script>
+
+    <!-- Browser tab favicon + install icons → the new Med Hub mark -->
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+    <!-- iOS home screen (iOS ignores manifest icons, so set it here too). -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- Public Sans (cached offline via the service worker's runtimeCaching rule) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
+
+    <!-- ================= SEO ================= -->
+    <title>Med Hub — منصة طبية عربية مجانية | كورسات تشريح وعلم أمراض وفلاش كارد ذكية</title>
+    <meta name="description" content="Med Hub منصة تعليم طبي عربية مجانية 100% لطلبة الطب وطب الأسنان: كورسات تفاعلية بالتشريح (Anatomy) وعلم الأمراض (Pathology)، شرح مبسط بالفيديو، اختبارات MCQ تحت كل محاضرة، وفلاش كارد ذكية بنظام التكرار المتباعد لمراجعة فعالة. تعلم الطب بقصة ممتعة ومفهومة." />
+    <meta name="keywords" content="طب أسنان, طب, تشريح, علم الأمراض, فلاش كارد طبي, كورسات طبية مجانية, تعليم طبي عربي, محاضرات طب, اختبارات طبية, مراجعة متباعدة, طلبة طب, منصة طبية, Med Hub, Anatomy, Pathology, Medical Education, Dental Education, Spaced Repetition, Flashcards, MCQ, Interactive Learning, Free Medical Courses, Medical Students" />
+    <meta name="author" content="Med Hub" />
+    <meta name="robots" content="index, follow" />
+
+    <!-- Open Graph (WhatsApp / Telegram / Facebook preview cards) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Med Hub" />
+    <meta property="og:title" content="Med Hub — منصة طبية عربية مجانية 100%" />
+    <meta property="og:description" content="المكان اللي يتحول بيه الطب لقصة ممتعة ومفهومة: كورسات تشريح وعلم أمراض، فيديوهات مبسطة، اختبارات MCQ، وفلاش كارد ذكية للمراجعة — مجاناً بالكامل." />
+    <meta property="og:url" content="https://medhub.example.com/" />
+    <meta property="og:image" content="/og-image.jpg" />
+    <meta property="og:locale" content="ar_AR" />
+    <meta property="og:locale:alternate" content="en_US" />
+
+    <!-- Twitter / X card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Med Hub — منصة طبية عربية مجانية 100%" />
+    <meta name="twitter:description" content="كورسات تشريح وعلم أمراض تفاعلية، اختبارات MCQ، وفلاش كارد ذكية بنظام التكرار المتباعد — تعليم طبي مجاني لطلبة الطب وطب الأسنان." />
+    <meta name="twitter:image" content="/og-image.jpg" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

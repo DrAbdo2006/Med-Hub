@@ -1,0 +1,92 @@
+// ===========================================================================
+// App — the application router.
+//
+// Structure:
+//   <BrowserRouter>
+//     <AuthProvider>            session/profile context for the whole tree
+//       /           -> LandingPage         (public — marketing front door)
+//       /login      -> AuthPage            (public)
+//       /dashboard  -> PortalHome          (protected — the student portal)
+//       /course/:id -> CourseDetail        (protected)
+//       /lecture/:id-> LectureView         (protected)
+//       /flashcards -> StudyModule         (protected — personal flashcards
+//                      tool; old /course redirects here)
+//       /admin      -> AdminDashboard      (protected + admin-only)
+//       *           -> redirect to / (public landing; it offers "Go to
+//                      Dashboard" when a session exists)
+//
+// Protected routes sit under <ProtectedRoute/> (must be logged in). The admin
+// panel sits additionally under <RequireAdmin/>, which redirects non-admins
+// away — the UI guard mirrors the is_admin() RLS that actually protects writes.
+// ===========================================================================
+import { lazy } from "react";
+import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
+import { AuthProvider, useAuth } from "./AuthProvider";
+import ProtectedRoute from "./ProtectedRoute";
+import RouteBoundary from "./RouteBoundary";
+
+// Route components are code-split with React.lazy so the heavy stacks load only
+// when their route is visited. In particular this keeps the Markdown parser +
+// KaTeX (LectureView / AdminDashboard→LectureEditor) and the large Flashcards
+// study module (StudyModule) OUT of the Login/Home entry bundle.
+const LandingPage = lazy(() => import("./LandingPage"));
+const AuthPage = lazy(() => import("./AuthPage"));
+const PortalHome = lazy(() => import("./PortalHome"));
+const CourseDetail = lazy(() => import("./CourseDetail"));
+const LectureView = lazy(() => import("./LectureView"));
+const StudyModule = lazy(() => import("./StudyModule"));
+const AdminDashboard = lazy(() => import("./AdminDashboard"));
+const Profile = lazy(() => import("./Profile"));
+
+// Admin gate. Waits for the auth/profile check to resolve (so it never flashes
+// the admin UI before the role is known), then redirects non-admins home.
+function RequireAdmin() {
+  const { loading, isAdmin } = useAuth();
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-med-bg">
+        <div className="h-10 w-10 rounded-full border-2 border-med-primary/30 border-t-med-primary animate-spin" />
+      </div>
+    );
+  }
+  if (!isAdmin) return <Navigate to="/dashboard" replace />;
+  return <Outlet />;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        {/* One boundary handles lazy-chunk loading (spinner) + load failures
+            (retry/reload), so a flaky network or a fresh deploy never white-screens. */}
+        <RouteBoundary>
+          <Routes>
+            {/* public — the landing page must stay OUTSIDE the auth guard */}
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<AuthPage />} />
+
+            {/* protected */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/dashboard" element={<PortalHome />} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/course/:id" element={<CourseDetail />} />
+              <Route path="/lecture/:id" element={<LectureView />} />
+              {/* personal flashcards tool (user-generated, Anki-style).
+                  Old bare /course URL redirects here so bookmarks keep working. */}
+              <Route path="/flashcards" element={<StudyModule />} />
+              <Route path="/course" element={<Navigate to="/flashcards" replace />} />
+
+              {/* admin-only */}
+              <Route element={<RequireAdmin />}>
+                <Route path="/admin" element={<AdminDashboard />} />
+              </Route>
+            </Route>
+
+            {/* anything else -> public landing (no auth surprise on bad URLs) */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </RouteBoundary>
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}

@@ -1,0 +1,43 @@
+/* ==========================================================================
+   Med Hub — Design System base stylesheet
+   Import this once at your app entry (e.g. main.jsx: `import "./index.css"`).
+   ========================================================================== */
+
+/* 1. Fonts — Public Sans (300 Light / 400 Regular / 600 SemiBold) ----------
+   Option A: @import (works in any plain CSS file). */
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap');
+
+/* Option B: if you prefer a <link> in index.html instead of the @import above:
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap" rel="stylesheet">
+*/
+
+/* 2. Tailwind layers (keep if you use the Tailwind build pipeline) --------- */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 3. Brand palette as CSS variables --------------------------------------- */
+:root {
+  --med-bg: #F7F9FA;      /* 60% — app background            */
+  --med-primary: #1B98E0; /* 30% — headings, topics, icons   */
+  --med-accent: #E83151;  /* 10% — keywords, primary buttons */
+  --med-text: #61636b;    /* body text                       */
+  --med-lines: #C9A86A;   /* divider lines / borders         */
+}
+
+/* 4. Global defaults: background, body text colour, base font ------------- */
+html, body {
+  background-color: var(--med-bg);
+  color: var(--med-text);
+  font-family: 'Public Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-weight: 300; /* Light by default for body copy */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings lean on SemiBold + primary blue by default (override per-use). */
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+}
