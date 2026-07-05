@@ -31,7 +31,7 @@
 // ===========================================================================
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, ArrowUp } from "lucide-react";
+import { ArrowLeft, ArrowUp, Youtube, Instagram } from "lucide-react";
 import {
   motion,
   AnimatePresence,
@@ -66,7 +66,7 @@ const LANDING_CSS = `
     radial-gradient(900px 560px at 112% 112%, rgba(1, 12, 40, 0.55), transparent 62%);
   background-attachment: fixed;
   color: var(--l-text);
-  font-family: "Public Sans", "Segoe UI", system-ui, -apple-system, "Noto Sans Arabic", sans-serif;
+ font-family: "Vazirmatn", "Public Sans", "Segoe UI", system-ui, -apple-system, "Noto Sans Arabic", sans-serif;
   letter-spacing: 0;
   overflow-x: hidden;
 }
@@ -424,9 +424,9 @@ function ScrollTopFab({ reduced }) {
 }
 
 const FEATURES = [
-  { emoji: "🎬", title: "فيديو المحاضرة", body: "شرح تفصيلي، خفيف، ولطيف." },
-  { emoji: "📝", title: "اختبر نفسك (MCQ)", body: "كويز ذكي تحت كل محاضرة حتى تقيم فهمك." },
-  { emoji: "🖼️", title: "محتوى متكامل", body: "صور توضيحية، وصف دقيق، وكل التفاصيل اللي تحتاجها جوا الفيديو." },
+  { emoji: "", title: "فيديو المحاضرة", body: "شرح تفصيلي، خفيف، ولطيف." },
+  { emoji: "", title: "اختبر نفسك (MCQ)", body: "كويز ذكي تحت كل محاضرة حتى تقيم فهمك." },
+  { emoji: "", title: "محتوى متكامل", body: "صور توضيحية، وصف دقيق، وكل التفاصيل اللي تحتاجها جوا الفيديو." },
 ];
 
 export default function LandingPage() {
@@ -508,7 +508,7 @@ export default function LandingPage() {
               <span className="mh-hero-badge">منصة طبية عربية.. مجانية 100%</span>
             </motion.p>
             <motion.h1 id="mh-hero-title" variants={fadeUp}>
-              مرحباً بك في <span className="mh-en">Med Hub</span> 🚀
+              مرحباً بك في <span className="mh-en">Med Hub</span> 
             </motion.h1>
             <motion.p className="mh-hero-sub" variants={fadeUp}>
               المكان اللي يتحول بيه الطب.. لقصة ممتعة ومفهومة.
@@ -524,7 +524,7 @@ export default function LandingPage() {
                 whileHover={reduced ? undefined : { scale: 1.04 }}
                 whileTap={reduced ? undefined : { scale: 0.97 }}
               >
-                {session ? "الذهاب إلى لوحة التحكم" : "ابدأ الآن"}
+                {session ? " أبدأ الآن" : "ابدأ الآن"}
               </motion.button>
             </motion.div>
           </motion.div>
@@ -664,20 +664,39 @@ export default function LandingPage() {
               whileHover={reduced ? undefined : { scale: 1.04 }}
               whileTap={reduced ? undefined : { scale: 0.97 }}
             >
-              جرب الآن ✨
-              <ArrowLeft
-                aria-hidden="true"
-                strokeWidth={2.5}
-                className="h-6 w-6 transition-transform duration-300 motion-reduce:transition-none group-hover:-translate-x-2 motion-reduce:group-hover:translate-x-0"
-              />
+              جرب الآن 
+            
             </motion.button>
           </motion.div>
         </section>
       </main>
 
       <footer className="mh-footer">
-        <div className="mh-wrap">
-          © {new Date().getFullYear()} <span className="mh-en">Med Hub</span>. نتعلم ونكبر سوية.
+        <div className="mh-wrap flex flex-col items-center justify-between gap-4 sm:flex-row">
+          <div>
+            © {new Date().getFullYear()} <span className="mh-en">Med Hub</span>. نتعلم ونكبر سوية.
+          </div>
+          {/* social links — fill in the hrefs */}
+          <div className="flex items-center gap-2">
+            <a
+              href="https://www.youtube.com/@MedHuub"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Med Hub on YouTube"
+              className="rounded-full p-2 text-white/60 transition-colors duration-200 hover:bg-white/10 hover:text-[#63C4F1] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#8fd0f5]"
+            >
+              <Youtube className="h-5 w-5" aria-hidden="true" />
+            </a>
+            <a
+              href="https://www.instagram.com/medhuub/"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Med Hub on Instagram"
+              className="rounded-full p-2 text-white/60 transition-colors duration-200 hover:bg-white/10 hover:text-[#63C4F1] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#8fd0f5]"
+            >
+              <Instagram className="h-5 w-5" aria-hidden="true" />
+            </a>
+          </div>
         </div>
       </footer>
 
