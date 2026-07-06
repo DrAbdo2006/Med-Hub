@@ -32,6 +32,15 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
 
+    <!-- Vazirmatn preloads — ONLY the two above-the-fold weights (hero h1 =
+         800, hero sub/body = 400); preloading every weight would hurt LCP.
+         `crossorigin` is mandatory on font preloads (same-origin included) or
+         the browser re-fetches the file with different credentials mode.
+         FOIT itself is prevented by font-display: swap in index.css — these
+         preloads only raise fetch priority. -->
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/Vazirmatn-ExtraBold.woff2" crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/Vazirmatn-Regular.woff2" crossorigin />
+
     <!-- ================= SEO ================= -->
     <title>Med Hub — منصة طبية عربية مجانية | كورسات تشريح وعلم أمراض وفلاش كارد ذكية</title>
     <meta name="description" content="Med Hub منصة تعليم طبي عربية مجانية 100% لطلبة الطب وطب الأسنان: كورسات تفاعلية بالتشريح (Anatomy) وعلم الأمراض (Pathology)، شرح مبسط بالفيديو، اختبارات MCQ تحت كل محاضرة، وفلاش كارد ذكية بنظام التكرار المتباعد لمراجعة فعالة. تعلم الطب بقصة ممتعة ومفهومة." />

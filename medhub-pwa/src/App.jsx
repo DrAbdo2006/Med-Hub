@@ -28,8 +28,13 @@ import RouteBoundary from "./RouteBoundary";
 // Route components are code-split with React.lazy so the heavy stacks load only
 // when their route is visited. In particular this keeps the Markdown parser +
 // KaTeX (LectureView / AdminDashboard→LectureEditor) and the large Flashcards
-// study module (StudyModule) OUT of the Login/Home entry bundle.
-const LandingPage = lazy(() => import("./LandingPage"));
+// study module (StudyModule) OUT of the entry bundle.
+//
+// EXCEPTION — LandingPage loads EAGERLY: it's the public first paint at "/",
+// so its first render shouldn't wait on a second network round-trip. All
+// internal (auth-gated) routes stay lazy behind RouteBoundary, which already
+// provides the Suspense spinner + failed-chunk Retry/Reload fallback.
+import LandingPage from "./LandingPage";
 const AuthPage = lazy(() => import("./AuthPage"));
 const PortalHome = lazy(() => import("./PortalHome"));
 const CourseDetail = lazy(() => import("./CourseDetail"));

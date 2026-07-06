@@ -35,10 +35,12 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Precache every build asset so the whole app shell works offline.
-        // Precache every build asset — incl. lazy JS chunks (js) and KaTeX
-        // fonts (woff2/woff/ttf) — so code-split routes & math work OFFLINE.
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2,ttf}"],
+        // Precache every build asset — incl. ALL lazy JS chunks (so the
+        // manualChunks split below stays fully offline-capable) and woff2
+        // fonts (Vazirmatn + KaTeX). ttf deliberately NOT precached: the
+        // .ttf files remain as an @font-face fallback for ancient browsers,
+        // but precaching both formats would double the offline font weight.
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
         navigateFallback: "/index.html",
         cleanupOutdatedCaches: true,
         runtimeCaching: [
@@ -70,4 +72,43 @@ export default defineConfig({
       },
     }),
   ],
+
+  build: {
+    rollupOptions: {
+      output: {
+        // -------------------------------------------------------------------
+        // Vendor splitting. Function form (robust across dep updates).
+        //
+        // THE ONE RULE THAT MATTERS: react + react-dom (+ scheduler, react's
+        // internal dep) live TOGETHER in one 'react-vendor' chunk. Splitting
+        // them — or hoisting a React-dependent lib into a chunk that can load
+        // before React — causes init-order errors and white screens.
+        // react-router is React-dependent and always needed at boot, so it
+        // rides in react-vendor too (loading it separately buys nothing).
+        //
+        // framer-motion and lucide-react get their own chunks: independent
+        // libs, safe to load in parallel, cache separately across deploys.
+        //
+        // Everything else (KaTeX/markdown stack, Supabase, Dexie…) is left to
+        // Rollup so it stays attached to the LAZY route chunks that import it
+        // — naming those here would not make them eager, but leaving them
+        // alone keeps this list from rotting as deps change.
+        //
+        // PWA: manualChunks only renames/regroups hashed assets in dist/;
+        // Workbox's globPatterns (**/*.js) precaches whichever chunks exist,
+        // so offline keeps working — verified by the precache count.
+        // -------------------------------------------------------------------
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom)[\\/]/.test(id)) {
+            return "react-vendor";
+          }
+          if (/[\\/]node_modules[\\/]framer-motion[\\/]/.test(id)) return "motion";
+          if (/[\\/]node_modules[\\/]lucide-react[\\/]/.test(id)) return "icons";
+          if (/[\\/]node_modules[\\/]@supabase[\\/]/.test(id)) return "supabase";
+          return undefined;
+        },
+      },
+    },
+  },
 });
