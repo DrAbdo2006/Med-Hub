@@ -30,7 +30,20 @@
     <!-- Public Sans (cached offline via the service worker's runtimeCaching rule) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
+    <!-- Loaded ASYNC (media=print → all on load) so this cross-origin
+         stylesheet never render-blocks first paint. display=swap in the URL
+         prevents FOIT; the noscript keeps fonts for JS-off visitors. The SW
+         runtime-caches both the stylesheet and the woff2s for offline. -->
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
+    </noscript>
 
     <!-- Vazirmatn preloads — ONLY the two above-the-fold weights (hero h1 =
          800, hero sub/body = 400); preloading every weight would hurt LCP.
