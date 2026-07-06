@@ -71,68 +71,29 @@ const ThemeCtx = createContext(false);
 //   deck.gaps  : { id, text }                 -> fill-in-the-blank ({{...}} markers)
 // SM-2 scheduling is tracked separately by entity id.
 // ---------------------------------------------------------------------------
-const INITIAL_FOLDERS = [
-  { id: "fa", title: "Anatomy", iconKey: "brain" },
-  { id: "fp", title: "Physiology", iconKey: "heart" },
-];
-const INITIAL_DECKS = [
-  {
-    id: "an1", folderId: "fa", title: "Lecture 1: Neuroanatomy",
-    description: "Cranial nerves, hemispheres, and cortical lobes.",
-    iconKey: "brain", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "a1", q: "Which cranial nerve is responsible for the sense of smell?", a: "The olfactory nerve (CN I). It carries sensory information for smell from the nasal epithelium to the olfactory bulb.", image: null },
-      { id: "a2", q: "What structure connects the two cerebral hemispheres?", a: "The corpus callosum — a thick band of ~200 million myelinated axons enabling interhemispheric communication.", image: null },
-      { id: "a3", q: "Name the four lobes of the cerebral cortex.", a: "Frontal, parietal, temporal, and occipital lobes. (The insula is sometimes considered a fifth, hidden lobe.)", image: null },
-    ],
-    gaps: [
-      { id: "ag1", text: "The {{olfactory}} nerve (CN {{I}}) carries the sense of smell." },
-      { id: "ag2", text: "The {{corpus callosum}} connects the two cerebral hemispheres." },
-      { id: "ag3", text: "The four cortical lobes are {{frontal}}, {{parietal}}, {{temporal}}, and {{occipital}}." },
-    ],
-  },
-  {
-    id: "an2", folderId: "fa", title: "Lecture 2: Brainstem & Limbic System",
-    description: "Vital centers and memory structures.",
-    iconKey: "brain", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "a4", q: "Which part of the brainstem regulates basic vital functions like breathing and heart rate?", a: "The medulla oblongata. It houses the cardiac, respiratory, and vasomotor centers controlling autonomic function.", image: null },
-      { id: "a5", q: "What is the functional role of the hippocampus?", a: "The hippocampus is essential for forming new declarative (explicit) memories and for spatial navigation.", image: null },
-    ],
-    gaps: [
-      { id: "ag4", text: "The {{medulla oblongata}} regulates breathing and heart rate." },
-      { id: "ag5", text: "The {{hippocampus}} is essential for forming new declarative memories." },
-    ],
-  },
-  {
-    id: "ph1", folderId: "fp", title: "Lecture 1: Membranes & Hormones",
-    description: "Resting potentials and glucose control.",
-    iconKey: "heart", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "p1", q: "What is the normal resting membrane potential of a typical neuron?", a: "Approximately −70 mV, maintained largely by the Na⁺/K⁺-ATPase pump and selective K⁺ permeability.", image: null },
-      { id: "p2", q: "Which hormone lowers blood glucose, and where is it produced?", a: "Insulin, produced by the beta cells of the pancreatic islets of Langerhans. It promotes cellular glucose uptake.", image: null },
-      { id: "p3", q: "Define cardiac output and give its formula.", a: "Cardiac output = Heart Rate × Stroke Volume. It is the volume of blood pumped by the heart per minute (~5 L/min at rest).", image: null },
-    ],
-    gaps: [
-      { id: "pg1", text: "A typical neuron's resting membrane potential is about {{-70}} mV." },
-      { id: "pg2", text: "{{Insulin}} is produced by pancreatic {{beta}} cells and lowers blood glucose." },
-      { id: "pg3", text: "Cardiac output = {{heart rate}} × {{stroke volume}}." },
-    ],
-  },
-  {
-    id: "ph2", folderId: "fp", title: "Lecture 2: Respiration & Renal",
-    description: "Gas exchange and the nephron.",
-    iconKey: "heart", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "p4", q: "What drives oxygen exchange in the alveoli?", a: "Simple diffusion down a partial-pressure gradient — O₂ moves from high alveolar PO₂ into pulmonary capillary blood.", image: null },
-      { id: "p5", q: "Which part of the nephron is the primary site of water and solute reabsorption?", a: "The proximal convoluted tubule (PCT), which reabsorbs roughly 65% of filtered Na⁺, water, and most glucose and amino acids.", image: null },
-    ],
-    gaps: [
-      { id: "pg4", text: "Oxygen crosses the alveolar membrane by simple {{diffusion}}." },
-      { id: "pg5", text: "The {{proximal convoluted tubule}} reabsorbs ~65% of filtered sodium and water." },
-    ],
-  },
-];
+// ---------------------------------------------------------------------------
+// LEGACY SEED PURGE MANIFEST — the app used to seed demo folders/decks
+// (INITIAL_FOLDERS / INITIAL_DECKS) into IndexedDB for first-run users. That
+// was a dual source of truth: a user who deleted ALL content emptied the DB,
+// which re-triggered the "empty -> seed" check on the next load and the demo
+// cards came back. Seeding is REMOVED — every user now starts 100% empty.
+// This manifest only IDENTIFIES old mock rows so the one-time guarded
+// cleanup effect can remove them without touching real user data: a deck is
+// purged only if its id AND title still match the seed and it contains no
+// user-added cards.
+// ---------------------------------------------------------------------------
+const LEGACY_SEED = {
+  folders: [
+    { id: "fa", title: "Anatomy" },
+    { id: "fp", title: "Physiology" },
+  ],
+  decks: [
+    { id: "an1", title: "Lecture 1: Neuroanatomy", cardIds: ["a1", "a2", "a3"] },
+    { id: "an2", title: "Lecture 2: Brainstem & Limbic System", cardIds: ["a4", "a5"] },
+    { id: "ph1", title: "Lecture 1: Membranes & Hormones", cardIds: ["p1", "p2", "p3"] },
+    { id: "ph2", title: "Lecture 2: Respiration & Renal", cardIds: ["p4", "p5"] },
+  ],
+};
 
 const ACCENTS = [
   { accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary" },
@@ -568,25 +529,37 @@ export default function App() {
 
   // ("System Default" OS-sync now lives in ThemeProvider — no local copy.)
 
-  // First-run seeding: if the DB is genuinely empty (no legacy data migrated),
-  // seed the starter folders/decks via writers — exactly once.
-  const seededRef = useRef(false);
+  // ONE-TIME legacy mock cleanup (first-run seeding is gone — users start
+  // empty). Guarded by the persisted `legacySeedPurged` meta flag so it never
+  // runs twice, and it removes ONLY rows still matching the old seed's
+  // id + title + card-id signature: anything the user created, renamed, or
+  // added cards into is kept. Deletions go through `writers`, so the cloud
+  // outbox gets tombstones and pull-merge can't resurrect the mock rows on
+  // another device.
+  const purgeRanRef = useRef(false);
   useEffect(() => {
-    if (loading || seededRef.current) return;
-    seededRef.current = true;
-    if (folders.length === 0 && decks.length === 0) {
-      (async () => {
-        for (const f of INITIAL_FOLDERS) await writers.createFolder({ id: f.id, title: f.title, iconKey: f.iconKey });
-        for (const d of INITIAL_DECKS) {
-          const { cards = [], gaps = [], mcqs = [], ...proj } = d;
-          await writers.createProject({ ...proj, id: d.id, folderId: d.folderId });
-          for (const c of cards) await writers.createCard(d.id, { id: c.id, q: c.q, a: c.a });
-          for (const g of gaps) await writers.createGap(d.id, { id: g.id, text: g.text });
-          for (const m of mcqs) await writers.putMcq(d.id, m);
-        }
-      })();
-    }
-  }, [loading, folders, decks, writers]);
+    if (loading || purgeRanRef.current || meta.legacySeedPurged) return;
+    purgeRanRef.current = true;
+    (async () => {
+      const purgedDecks = new Set();
+      for (const seed of LEGACY_SEED.decks) {
+        const deck = decks.find((d) => d.id === seed.id);
+        if (!deck || deck.title !== seed.title) continue;          // renamed or absent → keep
+        const cardIds = (deck.cards || []).map((c) => c.id);
+        if (cardIds.some((id) => !seed.cardIds.includes(id))) continue; // user added cards → keep
+        await writers.deleteProject(seed.id);                      // cascades locally + tombstones to cloud
+        purgedDecks.add(seed.id);
+      }
+      for (const seed of LEGACY_SEED.folders) {
+        const folder = folders.find((f) => f.id === seed.id);
+        if (!folder || folder.title !== seed.title) continue;      // renamed or absent → keep
+        const stillHasDecks = decks.some((d) => d.folderId === seed.id && !purgedDecks.has(d.id));
+        if (stillHasDecks) continue;                               // user content inside → keep
+        await writers.hardDeleteFolder(seed.id);
+      }
+      await writers.setMeta("legacySeedPurged", true);             // never run again
+    })();
+  }, [loading, meta.legacySeedPurged, folders, decks, writers]);
 
   // ---- Supabase auth — shared platform session (AuthProvider) ----
   // Sign-in/up go through the shared client; AuthProvider's onAuthStateChange
@@ -1319,15 +1292,15 @@ function StudyView({ deck, session, setSession, srs, settings, onReview, onRecor
         backClass={`flex h-auto min-h-[14rem] flex-col items-center justify-center gap-4 rounded-3xl border border-slate-200 bg-gradient-to-br ${deck.accent} p-8 text-center shadow-xl`}
         front={
           <>
-            <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${deck.soft} ${deck.text}`}>Question</span>
-            <p dir="auto" className="h-auto text-xl font-medium leading-relaxed text-slate-900 sm:text-2xl"><Md text={card.q} /></p>
-            <span className="flex items-center gap-1.5 text-xs text-slate-400"><RotateCcw className="h-3.5 w-3.5" /> Tap to reveal answer</span>
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${deck.soft} ${deck.text} dark:text-[#63C4F1]`}>Question</span>
+            <p dir="auto" className="h-auto text-xl font-medium leading-relaxed text-slate-900 sm:text-2xl dark:text-slate-50"><Md text={card.q} /></p>
+            <span className="flex items-center gap-1.5 text-xs text-slate-400 dark:text-slate-300"><RotateCcw className="h-3.5 w-3.5" /> Tap to reveal answer</span>
           </>
         }
         back={
           <>
-            <span className="rounded-full bg-white/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">Answer</span>
-            <p dir="auto" className="h-auto text-lg font-medium leading-relaxed text-white sm:text-xl"><Md text={card.a} /></p>
+            <span className="rounded-full bg-white/20 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white dark:text-white">Answer</span>
+            <p dir="auto" className="h-auto text-lg font-medium leading-relaxed text-white sm:text-xl dark:font-semibold dark:text-white"><Md text={card.a} /></p>
           </>
         }
       />
@@ -1901,7 +1874,13 @@ function LibraryView({ folders, decks, occlusions, srs, onOpen, onCreateProject,
       )}
 
       {q && visibleGroups.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-400">No projects match “{query}”.</p>}
-      {!q && groups.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-400">No files yet. Use “New file” to create one.</p>}
+      {!q && groups.length === 0 && (
+        <div className="rounded-2xl border border-dashed border-slate-300 p-10 text-center">
+          <Layers className="mx-auto h-8 w-8 text-med-primary" aria-hidden="true" />
+          <p className="mt-3 text-sm font-semibold text-slate-700">No decks yet — create your first!</p>
+          <p className="mt-1 text-sm text-slate-400">Use “New file” above to build flashcards, gap sentences, a quiz, or an image-occlusion board.</p>
+        </div>
+      )}
 
       {visibleGroups.map((g) => (
         <Collapsible

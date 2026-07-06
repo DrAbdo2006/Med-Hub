@@ -13,6 +13,10 @@ import { requestPersistentStorage, migrateFromLocalStorageIfNeeded } from "./db"
 //      assets). This is the SOLE owner of the legacy key; the UI never reads it.
 // The service worker is auto-registered by vite-plugin-pwa (autoUpdate).
 async function boot() {
+  // LTR layout shell (bilingual). Arabic *text* is scoped to dir="rtl"/"auto"
+  // containers at the component level; the overall chrome flows left-to-right.
+  document.documentElement.setAttribute("dir", "ltr");
+
   await requestPersistentStorage();
   await migrateFromLocalStorageIfNeeded();
 

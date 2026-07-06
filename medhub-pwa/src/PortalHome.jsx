@@ -13,7 +13,7 @@
 // subject_id) — nothing is hardcoded, so admin-added subjects/courses appear
 // automatically. See migration 0002_subjects.sql.
 // ===========================================================================
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   LogOut, ShieldCheck, ArrowRight, BookOpen, Loader2, Layers,
@@ -31,9 +31,106 @@ function displayName(user, profile) {
 }
 
 /* -------------------------------------------------- navbar */
+// Row 2 — category sub-nav. Its own horizontally-scrollable row so the subject
+// links never squish against the brand/utility buttons on mobile/tablet.
+// dir="ltr" is set explicitly so the tabs read strictly Home → Anatomy →
+// Pathology from the LEFT edge (matching the LTR header around it),
+// regardless of the ambient page direction. Direction is set here — NOT via
+// justify-* classes, whose meaning flips under RTL.
+function SubjectTabs({ tabs, activeKey, onSelect }) {
+  const scrollerRef = useRef(null);
+  const activeRef = useRef(null);
+  const [fade, setFade] = useState({ start: false, end: false }); // start = LTR left edge
+
+  // Show a fade only on the edge(s) that actually hide content. Math.abs()
+  // keeps the "scrolled" amount direction-agnostic (harmless under LTR, and
+  // still correct if this row ever flips back to RTL).
+  const updateFade = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    if (max <= 1) return setFade({ start: false, end: false });
+    const scrolled = Math.abs(el.scrollLeft);
+    setFade({ start: scrolled > 1, end: scrolled < max - 1 });
+  }, []);
+
+  useEffect(() => {
+    updateFade();
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", updateFade, { passive: true });
+    window.addEventListener("resize", updateFade);
+    return () => {
+      el.removeEventListener("scroll", updateFade);
+      window.removeEventListener("resize", updateFade);
+    };
+  }, [updateFade, tabs.length]);
+
+  // Bring the active tab into view on load / tab change (RTL-safe, reduced-motion aware).
+  useEffect(() => {
+    const node = activeRef.current;
+    if (!node) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    node.scrollIntoView({ inline: "center", block: "nearest", behavior: reduce ? "auto" : "smooth" });
+  }, [activeKey, tabs.length]);
+
+  return (
+    <div className="relative border-t border-gray-200/60 dark:border-white/5">
+      {/* edge fades — start = physical LEFT (LTR start), end = physical right.
+          (Swapped along with the dir flip: under LTR, scrolled-past content
+          hides on the left, upcoming content on the right.) */}
+      <div
+        aria-hidden="true"
+        className={
+          "pointer-events-none absolute inset-y-0 left-0 z-10 w-10 bg-gradient-to-r from-white/95 to-transparent transition-opacity duration-200 dark:from-[#0e172a]/95 " +
+          (fade.start ? "opacity-100" : "opacity-0")
+        }
+      />
+      <div
+        aria-hidden="true"
+        className={
+          "pointer-events-none absolute inset-y-0 right-0 z-10 w-10 bg-gradient-to-l from-white/95 to-transparent transition-opacity duration-200 dark:from-[#0e172a]/95 " +
+          (fade.end ? "opacity-100" : "opacity-0")
+        }
+      />
+      <nav
+        ref={scrollerRef}
+        dir="ltr"
+        className="no-scrollbar mx-auto flex w-full max-w-6xl items-center justify-start overflow-x-auto whitespace-nowrap px-5 py-2"
+      >
+        <ul className="flex items-center gap-2">
+          {tabs.map((tab) => {
+            const active = tab.key === activeKey;
+            return (
+              <li key={tab.key} className="shrink-0">
+                <button
+                  ref={active ? activeRef : null}
+                  onClick={() => onSelect(tab.key)}
+                  className={
+                    "relative flex min-h-[44px] items-center rounded-lg px-4 text-sm font-medium transition-colors " +
+                    (active
+                      ? "text-med-primary"
+                      : "text-gray-600 hover:text-gray-900 hover:bg-gray-100 dark:text-slate-300 dark:hover:text-white dark:hover:bg-white/10")
+                  }
+                >
+                  {tab.name}
+                  {active && (
+                    <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-med-primary" />
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+    </div>
+  );
+}
+
 function Navbar({ tabs, activeKey, onSelect, isAdmin, onSignOut, onAdmin, onProfile }) {
   return (
     <header className="sticky top-0 z-20 border-b border-gray-200/70 bg-white/85 backdrop-blur-md dark:border-white/10 dark:bg-[#0e172a]/95">
+      {/* Row 1 — brand (start) + utility buttons (end) */}
       <div className="mx-auto max-w-6xl px-5">
         <div className="flex h-16 items-center justify-between gap-4">
           {/* brand — links to the public landing page */}
@@ -44,33 +141,6 @@ function Navbar({ tabs, activeKey, onSelect, isAdmin, onSignOut, onAdmin, onProf
             <span className="text-slate-900 dark:text-white">MED</span>
             <span className="text-[#1B98E0] ml-1.5">HUB</span>
           </Link>
-
-          {/* tabs (center) — horizontally scrollable on small screens */}
-          <nav className="flex-1 overflow-x-auto">
-            <ul className="flex items-center justify-center gap-1 whitespace-nowrap">
-              {tabs.map((tab) => {
-                const active = tab.key === activeKey;
-                return (
-                  <li key={tab.key}>
-                    <button
-                      onClick={() => onSelect(tab.key)}
-                      className={
-                        "relative rounded-lg px-3.5 py-2 text-sm font-medium transition-colors " +
-                        (active
-                          ? "text-med-primary"
-                          : "text-gray-600 hover:text-gray-900 hover:bg-gray-100 dark:text-slate-300 dark:hover:text-white dark:hover:bg-white/10")
-                      }
-                    >
-                      {tab.name}
-                      {active && (
-                        <span className="absolute inset-x-2 -bottom-[1px] h-0.5 rounded-full bg-med-primary" />
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </nav>
 
           {/* account — email intentionally removed; spacing preserved */}
           <div className="flex items-center gap-2">
@@ -111,6 +181,9 @@ function Navbar({ tabs, activeKey, onSelect, isAdmin, onSignOut, onAdmin, onProf
           </div>
         </div>
       </div>
+
+      {/* Row 2 — subject sub-nav, directly below Row 1 and above the hero banner */}
+      <SubjectTabs tabs={tabs} activeKey={activeKey} onSelect={onSelect} />
     </header>
   );
 }
@@ -315,7 +388,7 @@ function HomeDashboard({ name, userId, onOpenLecture, onOpenCourse }) {
 
   return (
     <>
-      <section className="animate-enter relative mt-8 overflow-hidden rounded-3xl bg-gradient-to-br from-med-primary to-[#0f5e8c] px-7 py-12 sm:px-12 sm:py-16 text-white shadow-[0_24px_60px_-24px_rgba(27,152,224,0.45)]">
+      <section className="animate-enter relative mt-6 overflow-hidden rounded-3xl bg-gradient-to-br from-med-primary to-[#0f5e8c] px-7 py-12 sm:px-12 sm:py-16 text-white shadow-[0_24px_60px_-24px_rgba(27,152,224,0.45)]">
         <div className="pointer-events-none absolute -top-20 -right-16 h-72 w-72 rounded-full bg-white/10 blur-3xl" />
         <div className="pointer-events-none absolute -bottom-24 -left-16 h-64 w-64 rounded-full bg-[#1B98E0]/25 blur-3xl" />
         <div className="relative max-w-2xl">
@@ -374,9 +447,9 @@ function CourseCard({ course, onOpen, priority = false }) {
       </div>
       {/* info (remaining 40%): title top, "View course" pinned to the bottom */}
       <div className="flex h-2/5 min-h-0 flex-col p-5">
-        <h3 className="line-clamp-2 text-base font-semibold text-gray-900 dark:text-slate-100">{course.title}</h3>
+        <h3 dir="auto" className="line-clamp-2 text-base font-semibold text-gray-900 dark:text-slate-100">{course.title}</h3>
         {course.description && (
-          <p className="mt-1.5 line-clamp-2 text-sm leading-relaxed text-gray-500 dark:text-slate-300">{course.description}</p>
+          <p dir="auto" className="mt-1.5 line-clamp-2 text-sm leading-relaxed text-gray-500 dark:text-slate-300">{course.description}</p>
         )}
         <span className="mt-auto inline-flex items-center gap-1 text-sm font-medium text-med-primary">
           View course <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
@@ -390,7 +463,7 @@ function CoursesView({ subjectName, courses, loading, onOpen }) {
   return (
     <section className="animate-enter my-8">
       <div className="mb-5">
-        <h2 className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-slate-100">{subjectName}</h2>
+        <h2 dir="auto" className="text-2xl font-semibold tracking-tight text-gray-900 dark:text-slate-100">{subjectName}</h2>
         {!loading && (
           <p className="mt-1 text-sm text-gray-500 dark:text-slate-300">
             {courses.length} course{courses.length === 1 ? "" : "s"}

@@ -84,7 +84,7 @@ function Option({ text, index, answered, chosenIndex, correctIndex, onChoose }) 
       className={cls}
       style={style}
     >
-      <span className="flex-1">{text}</span>
+      <span dir="auto" className="flex-1">{text}</span>
       {icon}
     </button>
   );
@@ -97,7 +97,7 @@ function Question({ q, number, chosenIndex, onChoose }) {
   return (
     <div className="glass-panel rounded-2xl border border-gray-200/80 bg-white dark:border-white/10 dark:bg-white/10 p-5 shadow-sm">
       <p className="text-xs font-medium uppercase tracking-wide text-gray-400 dark:text-slate-300">Question {number}</p>
-      <h4 className="mt-1 text-base font-semibold leading-snug text-gray-900 dark:text-slate-100">{q.question}</h4>
+      <h4 dir="auto" className="mt-1 text-base font-semibold leading-snug text-gray-900 dark:text-slate-100">{q.question}</h4>
 
       <div className="mt-4 space-y-2.5" role="listbox" aria-label={`Options for question ${number}`}>
         {options.map((opt, i) => (
@@ -115,7 +115,7 @@ function Question({ q, number, chosenIndex, onChoose }) {
 
       {/* explanation appears after answering, if present */}
       {answered && q.explanation && (
-        <div className="mt-4 rounded-xl bg-med-primary/5 px-4 py-3 text-sm leading-relaxed text-gray-600 dark:text-slate-300">
+        <div dir="auto" className="mt-4 rounded-xl bg-med-primary/5 px-4 py-3 text-sm leading-relaxed text-gray-600 dark:text-slate-300">
           <span className="font-semibold text-med-primary">Why: </span>
           {q.explanation}
         </div>

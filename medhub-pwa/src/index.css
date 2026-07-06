@@ -43,6 +43,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Hide scrollbars cleanly (used by the subject sub-nav scroll row). */
+@layer utilities {
+  .no-scrollbar {
+    scrollbar-width: none;        /* Firefox */
+    -ms-overflow-style: none;     /* legacy Edge/IE */
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;                /* Chrome/Safari */
+  }
+}
+
 :root {
   --med-bg: #F7F9FA;
   --med-primary: #1B98E0;

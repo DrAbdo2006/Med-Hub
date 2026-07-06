@@ -135,7 +135,7 @@ function LectureCard({ lecture, state, onOpen, priority = false }) {
       {/* content */}
       <div className="flex flex-1 flex-col p-4">
         <div className="flex items-start gap-3">
-          <h3 className="line-clamp-2 flex-1 text-sm font-semibold leading-snug text-gray-900 dark:text-slate-100">
+          <h3 dir="auto" className="line-clamp-2 flex-1 text-sm font-semibold leading-snug text-gray-900 dark:text-slate-100">
             {lecture.title}
           </h3>
           <span className="mt-0.5 flex h-8 w-8 flex-none items-center justify-center rounded-full bg-med-primary/10 text-med-primary transition-colors group-hover:bg-med-primary group-hover:text-white">
@@ -143,7 +143,7 @@ function LectureCard({ lecture, state, onOpen, priority = false }) {
           </span>
         </div>
         {description && (
-          <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-gray-500 dark:text-slate-300">{description}</p>
+          <p dir="auto" className="mt-1 line-clamp-2 text-sm leading-relaxed text-gray-500 dark:text-slate-300">{description}</p>
         )}
       </div>
     </button>
@@ -257,9 +257,9 @@ export default function CourseDetail() {
 
       <PageTransition as="main" className="mx-auto max-w-5xl px-5 pb-16">
         <header className="animate-enter mt-8">
-          <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-gray-900 dark:text-slate-100">{course.title}</h1>
+          <h1 dir="auto" className="text-2xl sm:text-3xl font-semibold tracking-tight text-gray-900 dark:text-slate-100">{course.title}</h1>
           {course.description && (
-            <p className="mt-2 max-w-2xl leading-relaxed text-gray-600 dark:text-slate-300">{course.description}</p>
+            <p dir="auto" className="mt-2 max-w-2xl leading-relaxed text-gray-600 dark:text-slate-300">{course.description}</p>
           )}
           <p className="mt-3 text-sm text-gray-500 dark:text-slate-300">
             {lectures.length} lecture{lectures.length === 1 ? "" : "s"}

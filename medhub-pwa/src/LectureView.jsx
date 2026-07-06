@@ -193,7 +193,7 @@ export default function LectureView() {
       {/* animate-enter dropped: PageTransition now owns the entry motion */}
       <PageTransition as="main" className="mx-auto w-full max-w-3xl px-5 pb-16 pt-8">
         {/* title */}
-        <h1 className="text-3xl sm:text-4xl font-semibold leading-tight tracking-tight text-gray-900 dark:text-slate-100">
+        <h1 dir="auto" className="text-3xl sm:text-4xl font-semibold leading-tight tracking-tight text-gray-900 dark:text-slate-100">
           {lecture.title}
         </h1>
 

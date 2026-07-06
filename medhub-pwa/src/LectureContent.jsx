@@ -101,7 +101,7 @@ const components = {
 
 export default function LectureContent({ markdown }) {
   return (
-    <div className="prose prose-blue max-w-none dark:prose-invert prose-headings:font-semibold prose-headings:tracking-tight prose-a:text-med-primary prose-img:my-4 prose-pre:bg-gray-900 prose-pre:text-gray-100">
+    <div dir="auto" className="prose prose-blue max-w-none dark:prose-invert prose-headings:font-semibold prose-headings:tracking-tight prose-a:text-med-primary prose-img:my-4 prose-pre:bg-gray-900 prose-pre:text-gray-100">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeRaw, rehypeKatex]}
