@@ -62,69 +62,6 @@ const ThemeCtx = createContext(false);
 //   deck.gaps  : { id, text }                 -> fill-in-the-blank ({{...}} markers)
 // SM-2 scheduling is tracked separately by entity id.
 // ---------------------------------------------------------------------------
-const INITIAL_FOLDERS = [
-  { id: "fa", title: "Anatomy", iconKey: "brain" },
-  { id: "fp", title: "Physiology", iconKey: "heart" },
-];
-const INITIAL_DECKS = [
-  {
-    id: "an1", folderId: "fa", title: "Lecture 1: Neuroanatomy",
-    description: "Cranial nerves, hemispheres, and cortical lobes.",
-    iconKey: "brain", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "a1", q: "Which cranial nerve is responsible for the sense of smell?", a: "The olfactory nerve (CN I). It carries sensory information for smell from the nasal epithelium to the olfactory bulb.", image: null },
-      { id: "a2", q: "What structure connects the two cerebral hemispheres?", a: "The corpus callosum — a thick band of ~200 million myelinated axons enabling interhemispheric communication.", image: null },
-      { id: "a3", q: "Name the four lobes of the cerebral cortex.", a: "Frontal, parietal, temporal, and occipital lobes. (The insula is sometimes considered a fifth, hidden lobe.)", image: null },
-    ],
-    gaps: [
-      { id: "ag1", text: "The {{olfactory}} nerve (CN {{I}}) carries the sense of smell." },
-      { id: "ag2", text: "The {{corpus callosum}} connects the two cerebral hemispheres." },
-      { id: "ag3", text: "The four cortical lobes are {{frontal}}, {{parietal}}, {{temporal}}, and {{occipital}}." },
-    ],
-  },
-  {
-    id: "an2", folderId: "fa", title: "Lecture 2: Brainstem & Limbic System",
-    description: "Vital centers and memory structures.",
-    iconKey: "brain", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "a4", q: "Which part of the brainstem regulates basic vital functions like breathing and heart rate?", a: "The medulla oblongata. It houses the cardiac, respiratory, and vasomotor centers controlling autonomic function.", image: null },
-      { id: "a5", q: "What is the functional role of the hippocampus?", a: "The hippocampus is essential for forming new declarative (explicit) memories and for spatial navigation.", image: null },
-    ],
-    gaps: [
-      { id: "ag4", text: "The {{medulla oblongata}} regulates breathing and heart rate." },
-      { id: "ag5", text: "The {{hippocampus}} is essential for forming new declarative memories." },
-    ],
-  },
-  {
-    id: "ph1", folderId: "fp", title: "Lecture 1: Membranes & Hormones",
-    description: "Resting potentials and glucose control.",
-    iconKey: "heart", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "p1", q: "What is the normal resting membrane potential of a typical neuron?", a: "Approximately −70 mV, maintained largely by the Na⁺/K⁺-ATPase pump and selective K⁺ permeability.", image: null },
-      { id: "p2", q: "Which hormone lowers blood glucose, and where is it produced?", a: "Insulin, produced by the beta cells of the pancreatic islets of Langerhans. It promotes cellular glucose uptake.", image: null },
-      { id: "p3", q: "Define cardiac output and give its formula.", a: "Cardiac output = Heart Rate × Stroke Volume. It is the volume of blood pumped by the heart per minute (~5 L/min at rest).", image: null },
-    ],
-    gaps: [
-      { id: "pg1", text: "A typical neuron's resting membrane potential is about {{-70}} mV." },
-      { id: "pg2", text: "{{Insulin}} is produced by pancreatic {{beta}} cells and lowers blood glucose." },
-      { id: "pg3", text: "Cardiac output = {{heart rate}} × {{stroke volume}}." },
-    ],
-  },
-  {
-    id: "ph2", folderId: "fp", title: "Lecture 2: Respiration & Renal",
-    description: "Gas exchange and the nephron.",
-    iconKey: "heart", accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary",
-    cards: [
-      { id: "p4", q: "What drives oxygen exchange in the alveoli?", a: "Simple diffusion down a partial-pressure gradient — O₂ moves from high alveolar PO₂ into pulmonary capillary blood.", image: null },
-      { id: "p5", q: "Which part of the nephron is the primary site of water and solute reabsorption?", a: "The proximal convoluted tubule (PCT), which reabsorbs roughly 65% of filtered Na⁺, water, and most glucose and amino acids.", image: null },
-    ],
-    gaps: [
-      { id: "pg4", text: "Oxygen crosses the alveolar membrane by simple {{diffusion}}." },
-      { id: "pg5", text: "The {{proximal convoluted tubule}} reabsorbs ~65% of filtered sodium and water." },
-    ],
-  },
-];
-
 const ACCENTS = [
   { accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary" },
   { accent: "from-med-primary to-med-primary", soft: "bg-med-primary-soft", text: "text-med-primary" },
@@ -461,8 +398,8 @@ function useSpaceShortcut(onSpace) {
 // ---------------------------------------------------------------------------
 export default function App() {
   const saved = loadSaved();
-  const [folders, setFolders] = useState(saved?.folders || INITIAL_FOLDERS);
-  const [decks, setDecks] = useState(saved?.decks || INITIAL_DECKS);
+const [folders, setFolders] = useState([]);
+const [decks, setDecks] = useState([]);
   const [occlusions, setOcclusions] = useState(saved?.occlusions || []);
   const [progress, setProgress] = useState(saved?.progress || {}); // all-time cumulative
   const [lastProg, setLastProg] = useState(saved?.lastProg || {}); // most recent session per mode
