@@ -5,7 +5,7 @@ import { supabase } from "./lib/supabaseClient";
 import { useAuth } from "./AuthProvider";
 import { useTheme } from "./ThemeProvider";
 import { motion, useReducedMotion } from "framer-motion";
-import { startSync, onSyncStatus } from "./lib/sync";
+import { startSync, onSyncStatus, retryParked } from "./lib/sync";
 import { useAsset, useMedHubStore } from "./useMedHubStore";
 import { RATING_META, RATING_ORDER, textClass, softBgClass, borderClass, fillHex, initial } from "./ratingStyles";
 import {
@@ -890,6 +890,16 @@ const DARK_CSS = `
 .dark input, .dark textarea, .dark select { color:#f8fafc !important; }
 .dark input::placeholder, .dark textarea::placeholder { color:#94a3b8; }
 .dark select option { background-color:#1e293b; color:#f8fafc; }
+/* "Hard" rating (neutral gray = med-text #61636b). In light mode it's dark gray
+   on a near-white #EDF0F2 tint; on dark surfaces that pairing turns into washed
+   grey-on-near-white and fails to read. Keep it in the SAME gray family (a
+   darkened tint of #61636b, NOT an unrelated slate) with near-white text.
+   Central token fix → also corrects the CompleteView "Hard" stat box and any
+   other med-text-soft surface. Only the Hard rating uses these tokens, so the
+   Again/Good/Easy buttons are unaffected. */
+.dark .bg-med-text-soft { background-color:#3a3c42 !important; } /* dark tint of the med-text gray */
+.dark .border-med-text  { border-color:#7c7f87 !important; }     /* lighter gray → still reads as "gray rating" */
+.dark .text-med-text    { color:#f1f5f9 !important; }            /* slate-100 → ~10:1 on #3a3c42, AA pass */
 `;
 // ---------------------------------------------------------------------------
 // STRICT PALETTE ENFORCEMENT — remaps every leftover Tailwind default color
@@ -976,15 +986,56 @@ input,textarea,select{ color:#61636b !important; }
 // Renders nothing when idle — sync stays silent unless something is pending.
 function SyncBadge() {
   const [s, setS] = useState("idle");
-  useEffect(() => onSyncStatus(setS), []);
+  const [parked, setParked] = useState(0);   // # of failed items, from sync state
+  const [busy, setBusy] = useState(false);    // retry in flight (debounces taps)
+
+  useEffect(() => onSyncStatus((st, pk) => {
+    setS(st);
+    setParked(pk ?? 0);
+    // Re-enable the button once the flush resolves (any non-syncing state).
+    // Driven by the SAME sync state, so the badge can't show "failed" after a
+    // real success — success flips s→"idle" and this whole badge unmounts.
+    if (st !== "syncing") setBusy(false);
+  }), []);
+
   if (s === "idle") return null;
+  const isError = s === "error";
+  const retrying = busy || s === "syncing";   // spinner/disabled source of truth
+  const showRetry = parked > 0;               // button ONLY when items are parked
+
   const label =
     s === "syncing" ? "Syncing…" :
     s === "offline" ? "Offline — changes saved on this device" :
+    isError ? "Sync failed" :
     "Sync pending — will retry";
+
+  const onRetry = () => {
+    if (retrying) return;                      // no parallel flushes on rapid taps
+    setBusy(true);                             // immediate lockout (covers the pre-"syncing" gap)
+    retryParked();                             // engine coalesces + guards flushing
+  };
+
   return (
-    <div className="pointer-events-none fixed bottom-4 left-4 z-50 rounded-full border border-white/15 bg-slate-900 px-3 py-1.5 text-xs font-medium text-white shadow-xl ring-1 ring-white/10">
-      {label}
+    <div className={
+      "fixed bottom-4 left-4 z-50 flex max-w-[calc(100vw-2rem)] items-center gap-2 whitespace-nowrap rounded-full border py-1 pl-3 pr-1 text-xs font-medium text-white shadow-xl ring-1 " +
+      (showRetry ? "pointer-events-auto " : "pointer-events-none ") +
+      (isError ? "border-rose-400/30 bg-rose-900 ring-rose-400/20" : "border-white/15 bg-slate-900 ring-white/10")
+    }>
+      <span>{label}{isError && parked > 0 ? ` · ${parked}` : ""}</span>
+      {showRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={retrying}
+          aria-label={retrying ? "Retrying failed syncs" : `Retry ${parked} failed sync${parked === 1 ? "" : "s"}`}
+          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-full px-2.5 font-semibold text-med-primary transition hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-med-primary focus-visible:ring-offset-1 focus-visible:ring-offset-transparent disabled:opacity-60"
+        >
+          {retrying
+            ? <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            : <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
+          <span>{retrying ? "Retrying…" : "Retry"}</span>
+        </button>
+      )}
     </div>
   );
 }

@@ -42,8 +42,22 @@ export default defineConfig({
         // but precaching both formats would double the offline font weight.
         globPatterns: ["**/*.{js,css,html,ico,png,svg,woff,woff2}"],
         navigateFallback: "/index.html",
+        // The SPA fallback is for NAVIGATION requests only. Never let it (or any
+        // route) shadow Supabase API/auth calls — those must always hit the
+        // network so writes aren't served a stale/empty cached response.
+        navigateFallbackDenylist: [/^\/rest\//, /^\/auth\//, /supabase\.co/],
         cleanupOutdatedCaches: true,
         runtimeCaching: [
+          {
+            // ── Supabase: NEVER cache. Writes (POST/PATCH/DELETE to /rest/v1/)
+            //    and auth must be NetworkOnly — caching a write response is
+            //    wrong and can make the client hang on a stale/empty result.
+            //    This explicit rule guarantees the SW never intercepts them.
+            urlPattern: ({ url }) => url.hostname.endsWith(".supabase.co"),
+            handler: "NetworkOnly",
+            method: "GET",
+            options: { cacheName: "supabase-networkonly" },
+          },
           {
             // Google Fonts stylesheet
             urlPattern: ({ url }) => url.origin === "https://fonts.googleapis.com",

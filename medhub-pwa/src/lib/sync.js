@@ -34,17 +34,31 @@ const BACKOFF_MAX = 5 * 60_000;
 // Card images can be large data-URLs; anything bigger than this stays
 // local-only (stripped from the cloud snapshot) to keep RPC payloads sane.
 const MAX_IMAGE_BYTES = 512 * 1024;
+// Poison-item guard: after this many consecutive failures, PARK the item so a
+// single permanently-bad row can't pin the whole queue in "retrying" forever.
+const MAX_RETRIES = 5;
 
 let backoff = BACKOFF_MIN;
 let flushing = false;
 let timer = null;
 let started = false;
 
-// ---- tiny status bus ("idle" | "syncing" | "offline" | "retrying") --------
+// ---- tiny status bus -------------------------------------------------------
+//   "idle"     — queue empty (parked items ignored), everything synced
+//   "syncing"  — a flush is in progress
+//   "offline"  — no real connectivity / not signed in; changes safely queued
+//   "retrying" — a transient failure; will retry with backoff (bounded)
+//   "error"    — a hard failure: one or more items PARKED after MAX_RETRIES.
+//                Truthful terminal state — NOT an endless "will retry".
 let status = "idle";
+let parked = 0;   // number of PARKED (poison) outbox items — drives "N failed" UI
 const listeners = new Set();
-const setStatus = (s) => { if (s !== status) { status = s; listeners.forEach((f) => f(s)); } };
-export function onSyncStatus(fn) { listeners.add(fn); fn(status); return () => listeners.delete(fn); }
+const emit = () => listeners.forEach((f) => f(status, parked));
+const setStatus = (s) => { if (s !== status) { status = s; emit(); } };
+const setParked = (n) => { if (n !== parked) { parked = n; emit(); } };
+// Listeners receive (status, parkedCount). Second arg is additive — existing
+// single-arg subscribers keep working unchanged.
+export function onSyncStatus(fn) { listeners.add(fn); fn(status, parked); return () => listeners.delete(fn); }
 
 // ---- connectivity: never trust navigator.onLine alone ---------------------
 async function verifyOnline() {
@@ -57,9 +71,30 @@ async function verifyOnline() {
   } catch { return false; }
 }
 
-async function currentUserId() {
-  try { return (await supabase.auth.getSession()).data.session?.user?.id ?? null; }
-  catch { return null; }
+// Return a VALID session, refreshing a stale/near-expiry JWT first. A stale
+// token is the classic silent killer: the RPC runs with auth.uid() = null, RLS
+// rejects the write, and the item retries forever. Refreshing up front makes
+// the write actually pass the user_id = auth.uid() policy.
+async function validSession() {
+  try {
+    let { data: { session } } = await supabase.auth.getSession();
+    if (!session) return null;
+    // expires_at is epoch SECONDS. Refresh if expired or within 60s of expiry.
+    const skewMs = 60_000;
+    const expiresMs = (session.expires_at ?? 0) * 1000;
+    if (expiresMs - Date.now() <= skewMs) {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error || !data.session) {
+        console.error("[sync] session refresh failed:", error);
+        return null;
+      }
+      session = data.session;
+    }
+    return session;
+  } catch (e) {
+    console.error("[sync] getSession threw:", e);
+    return null;
+  }
 }
 
 // ---- enqueue (called by useMedHubStore writers after every local write) ----
@@ -103,40 +138,83 @@ export async function flushOutbox() {
   if (flushing) return;
   flushing = true;
   try {
-    const items = await db.outbox.toArray();
-    if (!items.length) { setStatus("idle"); return; }
-    if (!(await currentUserId())) return;         // signed out: keep queued
+    const all = await db.outbox.toArray();
+    // Parked (poison) items are excluded from the active working set so they
+    // never block healthy rows — but they still count toward the error state.
+    const parkedCount = all.filter((it) => it.parked).length;
+    const items = all.filter((it) => !it.parked);
+
+    setParked(parkedCount);   // keep the "N failed" count in sync with the store
+
+    if (!items.length) {
+      // Nothing left to try. If poison items remain, tell the truth: error.
+      setStatus(parkedCount ? "error" : "idle");
+      return;
+    }
+
+    const session = await validSession();
+    if (!session) {                                // signed out / unrefreshable
+      setStatus("offline");                        // queued; a later login flushes
+      return;
+    }
     if (!(await verifyOnline())) {                 // no REAL connectivity
       setStatus("offline");
       scheduleFlush(backoff);
       backoff = Math.min(backoff * 2, BACKOFF_MAX);
       return;
     }
+
     setStatus("syncing");
-    let failed = 0;
+    let transientFailures = 0;   // items that failed but are still retryable
+    let newlyParked = 0;         // items that just crossed MAX_RETRIES
+
     for (const it of items) {
       try {
-        const { error } = await supabase.rpc(it.entity === "deck" ? "fc_upsert_deck" : "fc_upsert_card", {
-          _id: String(it.entityId),
-          _data: it.payload ?? {},
-          _updated_at: new Date(it.updated_at).toISOString(),
-          _deleted: !!it.deleted,
-        });
-        if (error) throw error;
+        // Idempotent by client UUID (upsert key) + server LWW guard, so a
+        // retry that already landed is a safe no-op — never a duplicate row.
+        const { data, error } = await supabase.rpc(
+          it.entity === "deck" ? "fc_upsert_deck" : "fc_upsert_card",
+          {
+            _id: String(it.entityId),
+            _data: it.payload ?? {},
+            _updated_at: new Date(it.updated_at).toISOString(),
+            _deleted: !!it.deleted,
+          }
+        );
+        if (error) {
+          // Log the FULL response so failures are never invisible again.
+          console.error(`[sync] RPC ${it.entity} ${it.id} failed:`, { error, data });
+          throw error;
+        }
         // Remove ONLY if the row wasn't re-queued (newer edit) mid-flight.
         const cur = await db.outbox.get(it.id);
         if (cur && cur.updated_at === it.updated_at && cur.deleted === it.deleted) {
           await db.outbox.delete(it.id);
         }
-      } catch {
-        failed++;
-        await db.outbox.update(it.id, { retries: (it.retries || 0) + 1 }).catch(() => {});
+      } catch (e) {
+        const retries = (it.retries || 0) + 1;
+        if (retries >= MAX_RETRIES) {
+          // Poison item: park it and keep flushing the rest of the queue.
+          newlyParked++;
+          console.error(`[sync] parking poison item ${it.id} after ${retries} tries:`, e);
+          await db.outbox.update(it.id, { retries, parked: true, lastError: String(e?.message || e) }).catch(() => {});
+        } else {
+          transientFailures++;
+          await db.outbox.update(it.id, { retries }).catch(() => {});
+        }
       }
     }
-    if (failed) {
+
+    setParked(parkedCount + newlyParked);   // refreshed failed count
+
+    if (transientFailures) {
+      // Genuinely transient: bounded backoff retry (not an endless loop —
+      // each item is capped at MAX_RETRIES, then parks into "error").
       setStatus("retrying");
       scheduleFlush(backoff);
       backoff = Math.min(backoff * 2, BACKOFF_MAX);
+    } else if (parkedCount + newlyParked > 0) {
+      setStatus("error");     // healthy items drained; only poison remains
     } else {
       backoff = BACKOFF_MIN;
       setStatus("idle");
@@ -146,11 +224,22 @@ export async function flushOutbox() {
   }
 }
 
+// Manually clear parked poison items (e.g. a "Retry failed syncs" button):
+// un-park them and flush again. Exposed for the UI / debugging.
+export async function retryParked() {
+  const all = await db.outbox.toArray();
+  await Promise.all(
+    all.filter((it) => it.parked).map((it) => db.outbox.update(it.id, { parked: false, retries: 0 }))
+  );
+  backoff = BACKOFF_MIN;
+  scheduleFlush(0);
+}
+
 // ---- pull-merge: bring the other devices' rows in, LWW by updated_at ------
 const localStamp = (row) => row?.updated_at ?? row?.createdAt ?? 0;
 
 export async function pullMerge() {
-  if (!(await currentUserId())) return;
+  if (!(await validSession())) return;
   if (!(await verifyOnline())) return;
   const [decksRes, cardsRes] = await Promise.all([
     supabase.from("fc_decks").select("id, data, updated_at, deleted"),
