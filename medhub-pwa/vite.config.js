@@ -11,8 +11,9 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",       // new SW activates as soon as it's ready
       strategies: "generateSW",         // let Workbox generate the service worker
-      // Precache both icon sets (install wordmark + tab "M" favicon) for offline.
-      includeAssets: ["icon-192.png", "icon-512.png", "maskable-512.png", "apple-touch-icon.png", "favicon-48.png", "logo-wordmark.png"],
+      // Precache the icon set (incl. the new rounded + square marks) so the
+      // install icons are available offline on first launch.
+      includeAssets: ["logo-rounded.png", "logo-square.png", "apple-touch-icon.png", "favicon-48.png", "logo-wordmark.png"],
       manifest: {
         name: "Med Hub",
         short_name: "MedHub",
@@ -28,10 +29,12 @@ export default defineConfig({
         // Separate entries — never 'any maskable' on one icon — so the tab/desktop
         // icon ('any') is shown intact and Android uses the 'maskable' one.
         icons: [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
-          // padded safe-zone version so Android's adaptive mask doesn't clip it
-          { src: "/maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+          // 'any' entries → the transparent rounded mark (Chrome/Edge/Android install)
+          { src: "/logo-rounded.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/logo-rounded.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          // 'maskable' entry → the solid, square, safe-zone-padded mark so
+          // Android's adaptive mask fills no transparent corners and crops nothing.
+          { src: "/logo-square.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ],
       },
       workbox: {

@@ -20,12 +20,16 @@
       })();
     </script>
 
-    <!-- Browser tab favicon + install icons → the new Med Hub mark -->
+    <!-- Browser tab favicon + install icons → the new Med Hub mark.
+         Primary tab icon is the rounded logo; the 32/48px entries keep the
+         mark crisp at small sizes where rounded corners + detail get muddy. -->
+    <link rel="icon" type="image/png" href="/logo-rounded.png" />
     <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48.png" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
-    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
-    <!-- iOS home screen (iOS ignores manifest icons, so set it here too). -->
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-48.png" />
+    <!-- iOS home screen (iOS ignores manifest icons, so set it here too).
+         Square, no-transparency image → iOS applies its own squircle mask
+         with no black corners. -->
+    <link rel="apple-touch-icon" href="/logo-square.png" />
 
     <!-- Public Sans (cached offline via the service worker's runtimeCaching rule) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
