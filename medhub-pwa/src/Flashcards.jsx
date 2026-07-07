@@ -618,7 +618,6 @@ export default function App() {
   };
   const bumpActivity = () => { const k = dayKey(new Date()); writers.setMeta("studyActivity", { ...studyActivity, [k]: (studyActivity[k] || 0) + 1 }); };
   const recordFlip = (id, grade) => { bump(id, (c) => ({ [grade]: (c[grade] || 0) + 1, reviews: c.reviews + 1 })); bumpActivity(); };
-  const recordGap = (id, ok) => { bump(id, (c) => ({ gapTotal: c.gapTotal + 1, gapCorrect: c.gapCorrect + (ok ? 1 : 0) })); bumpActivity(); };
   const recordQuiz = (id, ok) => { bump(id, (c) => ({ quizTotal: c.quizTotal + 1, quizCorrect: c.quizCorrect + (ok ? 1 : 0) })); bumpActivity(); };
 
   // sessions — mastery study-loop: a DYNAMIC QUEUE of card ids (SM-2 ordered).
@@ -630,7 +629,7 @@ export default function App() {
       setSession({ ...base, flipped: false, results: { again: 0, hard: 0, good: 0, easy: 0 }, cards, queue: cards.map((c) => c.id), total: cards.length, graduated: 0 });
     } else if (mode === "gap") {
       const cards = sortByDue(deck.gaps);
-      setSession({ ...base, revealed: false, typed: [], correct: 0, cards, queue: cards.map((c) => c.id), total: cards.length, graduated: 0 });
+      setSession({ ...base, revealed: false, results: { again: 0, hard: 0, good: 0, easy: 0 }, cards, queue: cards.map((c) => c.id), total: cards.length, graduated: 0 });
     } else if (mode === "quiz") {
       const quiz = [...buildQuiz(deck)].sort((a, b) => dueOf(a.id) - dueOf(b.id));
       setSession({ ...base, selected: null, answered: false, correct: 0, quiz, queue: quiz.map((q) => q.id), total: quiz.length, graduated: 0 });
@@ -747,7 +746,7 @@ export default function App() {
         <Header inStudy minimal onBack={endSession} backLabel="Exit" />
         {session.done ? <CompleteView session={session} deck={deck} total={total} onRestart={() => startSession(session.deckId, session.mode)} onHome={endSession} />
           : session.mode === "flip" ? <StudyView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />
-          : session.mode === "gap" ? <GapView deck={deck} session={session} setSession={setSession} onReview={review} onRecord={recordGap} onFinish={recordLast} />
+          : session.mode === "gap" ? <GapView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />
           : <QuizView deck={deck} session={session} setSession={setSession} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />}
       </Shell>
     );
@@ -1307,31 +1306,53 @@ function FlipCard3D({ flipped, onFlip, front, back, frontClass = "", backClass =
   );
 }
 
+// ---------------------------------------------------------------------------
+// SHARED SM-2 review primitives — used by BOTH flip (StudyView) and gap
+// (GapView) so the grading logic, buttons, tokens, and shortcuts stay in ONE
+// place. Any future fix here applies to every card-style mode automatically.
+// ---------------------------------------------------------------------------
+// Grade the whole card once, schedule via SM-2, and advance the queue.
+// `resetPatch` is the per-mode pre-next reset (flip → {flipped:false},
+// gap → {revealed:false}).
+function gradeCard({ id, key, deck, session, setSession, onReview, onRecord, onFinish, mode, resetPatch }) {
+  const total = session.total || 1;
+  const changes = onReview(id, key);                   // SM-2 → persists, returns new state
+  onRecord(deck.id, key);
+  const graduated = changes.phase === "review";
+  const { queue, counts } = requeue(session.queue, id, graduated, session.reinserts || {});
+  const results = { ...session.results, [key]: (session.results?.[key] || 0) + 1 };
+  const graduatedCount = session.graduated + (graduated ? 1 : 0);
+  if (queue.length === 0) {
+    setSession({ ...session, results, queue, reinserts: counts, graduated: graduatedCount, done: true });
+    onFinish(deck.id, mode, { again: results.again || 0, hard: results.hard || 0, good: results.good || 0, easy: results.easy || 0, total });
+  } else {
+    setSession({ ...session, results, reinserts: counts, graduated: graduatedCount, ...resetPatch });
+    setTimeout(() => setSession((s) => (s ? { ...s, queue } : s)), 180);
+  }
+}
+
+// The four SM-2 rating buttons (Again / Hard / Good / Easy). Colors + order come
+// ONLY from ratingStyles.js. `prev` drives each button's projected-due hint.
+function RatingButtons({ prev, settings, onGrade }) {
+  const grades = RATING_ORDER.map((key) => ({ key, label: RATING_META[key].label }));
+  return (
+    <div>
+      <p className="mb-3 text-center text-sm text-slate-500 dark:text-slate-300">How well did you recall this? (SM-2 schedules the next review)</p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {grades.map((g) => <button key={g.key} onClick={() => onGrade(g.key)} className={`flex flex-col items-center rounded-xl border px-4 py-3 font-semibold transition hover:opacity-90 active:scale-95 ${softBgClass(g.key)} ${borderClass(g.key)} ${textClass(g.key)}`}><span>{g.label}</span><span className="text-xs font-normal opacity-70">{fmtUntil(projectDue(prev, g.key, settings))}</span></button>)}
+      </div>
+    </div>
+  );
+}
+
 function StudyView({ deck, session, setSession, srs, settings, onReview, onRecord, onFinish }) {
   const card = deck.cards.find((c) => c.id === session.queue[0]);
   const total = session.total || 1;
   const pct = Math.round((session.graduated / total) * 100);
   const prev = card ? srs[card.id] : null;
-  // Ratings + colors come ONLY from ratingStyles.js (single source of truth).
-  const grades = RATING_ORDER.map((key) => ({ key, label: RATING_META[key].label }));
-  function grade(g) {
-    if (!card) return;
-    const changes = onReview(card.id, g.key);          // SM-2 → persists, returns new state
-    onRecord(deck.id, g.key);
-    const graduated = changes.phase === "review";
-    const { queue, counts } = requeue(session.queue, card.id, graduated, session.reinserts || {});
-    const results = { ...session.results, [g.key]: (session.results[g.key] || 0) + 1 };
-    const graduatedCount = session.graduated + (graduated ? 1 : 0);
-    if (queue.length === 0) {
-      setSession({ ...session, results, queue, reinserts: counts, graduated: graduatedCount, done: true });
-      onFinish(deck.id, "flip", { again: results.again, easy: results.easy, good: results.good, hard: results.hard, total });
-    } else {
-      setSession({ ...session, results, flipped: false, reinserts: counts, graduated: graduatedCount });
-      setTimeout(() => setSession((s) => (s ? { ...s, queue } : s)), 180);
-    }
-  }
+  const grade = (key) => { if (card) gradeCard({ id: card.id, key, deck, session, setSession, onReview, onRecord, onFinish, mode: "flip", resetPatch: { flipped: false } }); };
   // Space: reveal the answer, then advance (graded "Good").
-  useSpaceShortcut(() => { if (!session.flipped) setSession({ ...session, flipped: true }); else grade(grades[2]); });
+  useSpaceShortcut(() => { if (!session.flipped) setSession({ ...session, flipped: true }); else grade("good"); });
   if (!card) return null;
   return (
     <div className="pb-40">
@@ -1358,14 +1379,9 @@ function StudyView({ deck, session, setSession, srs, settings, onReview, onRecor
       <div className="mx-auto mt-5 flex w-full max-w-2xl items-center justify-center text-xs text-slate-400">{session.queue.length} card{session.queue.length === 1 ? "" : "s"} left this round · {session.graduated}/{total} learned</div>
       <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-4 py-4 shadow-[0_-4px_24px_rgba(15,23,42,0.07)] backdrop-blur">
         <div className="mx-auto w-full max-w-2xl">
-          {session.flipped ? (
-            <div>
-              <p className="mb-3 text-center text-sm text-slate-500">How well did you recall this? (SM-2 schedules the next review)</p>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {grades.map((g) => <button key={g.key} onClick={() => grade(g)} className={`flex flex-col items-center rounded-xl border px-4 py-3 font-semibold transition hover:opacity-90 active:scale-95 ${softBgClass(g.key)} ${borderClass(g.key)} ${textClass(g.key)}`}><span>{g.label}</span><span className="text-xs font-normal opacity-70">{fmtUntil(projectDue(prev, g.key, settings))}</span></button>)}
-              </div>
-            </div>
-          ) : <p className="py-3 text-center text-sm text-slate-400">Read the question, then tap the card to reveal the answer.</p>}
+          {session.flipped
+            ? <RatingButtons prev={prev} settings={settings} onGrade={grade} />
+            : <p className="py-3 text-center text-sm text-slate-400">Read the question, then tap the card to reveal the answer.</p>}
         </div>
       </div>
     </div>
@@ -1448,51 +1464,46 @@ function GapEditorModal({ decks, editor, onClose, onSave, onBulk }) {
     </ModalShell>
   );
 }
-function GapView({ deck, session, setSession, onReview, onRecord, onFinish }) {
+// Cloze study: Reveal → Rate (SM-2), identical flow to StudyView. No typing /
+// validation — the whole sentence's gaps reveal together, then the card is
+// rated ONCE with the shared RatingButtons.
+function GapView({ deck, session, setSession, srs, settings, onReview, onRecord, onFinish }) {
   const total = session.total || 1;
   const card = deck.gaps.find((g) => g.id === session.queue[0]);
   const pct = Math.round((session.graduated / total) * 100);
   const parsed = card ? parseGaps(card.text) : { segments: [], answers: [], count: 0 };
-  const typed = session.typed || [];
-  const results = parsed.answers.map((ans, i) => normalize(typed[i]) === normalize(ans));
-  const allCorrect = parsed.answers.length > 0 && results.every(Boolean);
-  const numCorrect = results.filter(Boolean).length;
-  function setTyped(i, val) { const arr = [...typed]; arr[i] = val; setSession({ ...session, typed: arr }); }
-  function reveal() {
-    if (session.revealed || !card) return;
-    const changes = onReview(card.id, allCorrect ? "good" : "again");   // wrong = Forgot
-    onRecord(deck.id, allCorrect);
-    setSession({ ...session, revealed: true, correct: session.correct + (allCorrect ? 1 : 0), lastGraduated: changes.phase === "review" });
-  }
-  function next() {
-    const { queue, counts } = requeue(session.queue, card.id, !!session.lastGraduated, session.reinserts || {});
-    const graduated = session.graduated + (session.lastGraduated ? 1 : 0);
-    if (queue.length === 0) { setSession({ ...session, queue, reinserts: counts, graduated, done: true }); onFinish(deck.id, "gap", { correct: session.correct, total }); }
-    else setSession({ ...session, queue, reinserts: counts, graduated, revealed: false, typed: [], lastGraduated: false });
-  }
-  // Space: reveal answers, then advance (skipped while typing in a blank).
-  useSpaceShortcut(() => { if (!session.revealed) reveal(); else next(); });
+  const prev = card ? srs[card.id] : null;
+  const reveal = () => { if (card && !session.revealed) setSession({ ...session, revealed: true }); };
+  const grade = (key) => { if (card) gradeCard({ id: card.id, key, deck, session, setSession, onReview, onRecord, onFinish, mode: "gap", resetPatch: { revealed: false } }); };
+  // Space: reveal ALL gaps, then advance (graded "Good") — same as flip cards.
+  useSpaceShortcut(() => { if (!session.revealed) reveal(); else grade("good"); });
   if (!card) return null;
   return (
-    <div>
+    <div className="pb-40">
       <ProgressBar deck={deck} index={session.graduated} total={total} pct={pct} label="Gaps" />
       <div className="mx-auto w-full max-w-2xl">
-        <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-xl">
-          <span className={`mb-5 inline-block rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${deck.soft} ${deck.text}`}>Fill the gap{parsed.count > 1 ? "s" : ""}</span>
-          <p className="text-xl font-medium leading-relaxed text-slate-900 sm:text-2xl">
+        <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-xl dark:border-white/10 dark:bg-white/5">
+          <span className={`mb-5 inline-block rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide ${deck.soft} ${deck.text} dark:text-[#63C4F1]`}>Fill the gap{parsed.count > 1 ? "s" : ""}</span>
+          <p dir="auto" className="text-xl font-medium leading-relaxed text-slate-900 sm:text-2xl dark:text-slate-50">
             {parsed.segments.map((s, i) => {
               if (s.type === "text") return <Md key={i} text={s.value} />;
-              if (!session.revealed) return <input key={i} value={typed[s.bi] || ""} onChange={(e) => setTyped(s.bi, e.target.value)} onKeyDown={(e) => e.key === "Enter" && reveal()} className="mx-1 inline-block w-32 rounded-md border border-slate-300 bg-slate-50 px-2 py-1 text-base align-middle outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" placeholder="…" />;
-              return <span key={i} className={`mx-1 rounded-md px-2 py-0.5 font-bold ${results[s.bi] ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>{s.answer}</span>;
+              // Pre-reveal: neutral placeholder that keeps sentence flow (RTL-safe).
+              // Post-reveal: EVERY gap filled at once, tinted with the med-primary
+              // accent (readable in dark mode via the lighter primary tint).
+              return session.revealed
+                ? <span key={i} className="mx-1 rounded-md bg-med-primary-soft px-2 py-0.5 font-bold text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]">{s.answer}</span>
+                : <span key={i} className="mx-1 align-middle font-semibold tracking-wide text-med-subtle">[ … ]</span>;
             })}
           </p>
-          <div className="mt-6">
-            {session.revealed && <div className={`mb-4 flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-medium ${allCorrect ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{allCorrect ? <CheckCircle2 className="h-5 w-5" /> : <XCircle className="h-5 w-5" />}{allCorrect ? "All correct!" : `${numCorrect} / ${parsed.count} correct — answers shown above.`}</div>}
-            {!session.revealed ? <button onClick={reveal} className={`flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r ${deck.accent} px-4 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95`}><Lightbulb className="h-4 w-4" /> Reveal answer{parsed.count > 1 ? "s" : ""}</button>
-              : <button onClick={next} className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 font-semibold text-white shadow-md transition hover:bg-slate-800 active:scale-95">{session.queue.length <= 1 && session.lastGraduated ? "Finish" : "Next gap"}</button>}
-          </div>
         </div>
         <div className="mx-auto mt-5 flex w-full max-w-2xl items-center justify-center text-xs text-slate-400">{session.queue.length} gap{session.queue.length === 1 ? "" : "s"} left this round · {session.graduated}/{total} mastered</div>
+      </div>
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-4 py-4 shadow-[0_-4px_24px_rgba(15,23,42,0.07)] backdrop-blur dark:border-white/10">
+        <div className="mx-auto w-full max-w-2xl">
+          {session.revealed
+            ? <RatingButtons prev={prev} settings={settings} onGrade={grade} />
+            : <button onClick={reveal} className={`flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r ${deck.accent} px-4 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95`}><Lightbulb className="h-4 w-4" /> Reveal answer{parsed.count > 1 ? "s" : ""}</button>}
+        </div>
       </div>
     </div>
   );
@@ -2517,8 +2528,9 @@ function StudyNav({ index, total, onPrev, onNext }) {
 }
 function CompleteView({ session, deck, total, onRestart, onHome }) {
   const mode = session.mode;
-  // Flip mode → all four SM-2 ratings (from RATING_ORDER, so it can't go stale).
-  const stats = mode === "flip"
+  // Flip AND gap modes → all four SM-2 ratings (from RATING_ORDER, so it can't
+  // go stale). Both now use the shared Reveal→Rate flow. Quiz keeps correct/missed.
+  const stats = (mode === "flip" || mode === "gap")
     ? RATING_ORDER.map((r) => ({ label: RATING_META[r].label, value: session.results?.[r] || 0, color: textClass(r), bg: softBgClass(r) }))
     : [{ label: "Correct", value: session.correct, color: "text-emerald-600", bg: "bg-emerald-50" }, { label: "Missed", value: total - session.correct, color: "text-rose-600", bg: "bg-rose-50" }, { label: "Total", value: total, color: "text-slate-700", bg: "bg-slate-50" }];
   const titles = { flip: "Study Complete!", gap: "Gaps Complete!", quiz: "Quiz Complete!" };
