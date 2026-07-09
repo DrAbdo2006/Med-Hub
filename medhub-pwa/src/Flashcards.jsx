@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, createContext, useContext } from "react";
+import { useNavigate } from "react-router-dom";
 // Blob-based image storage (occlusion images live in IndexedDB, not localStorage)
 import { assetRepo } from "./db";
 import { supabase } from "./lib/supabaseClient";
@@ -2060,6 +2061,7 @@ function Section({ icon: Icon, title, subtitle, accent, action, children }) {
   );
 }
 function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, onSetDesc, onStudy, onAddCard, onEditCard, onDeleteCard, onAddGap, onEditGap, onDeleteGap, onImportMcqs, onDeleteMcq, onNewImage, onEditImage, onDeleteImage, onStudyImages }) {
+  const navigate = useNavigate();   // → Unified Study Room (/study/:deckId)
   const [renaming, setRenaming] = useState(false);
   const [importMsg, setImportMsg] = useState(null);
   // Per-section Edit Mode toggles (hide row edit/delete icons until active).
@@ -2081,7 +2083,11 @@ function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, o
   }
   return (
     <div>
-      <button onClick={onBack} className="mb-4 inline-flex items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to files</button>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <button onClick={onBack} className="inline-flex items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to files</button>
+        {/* Unified Study Room — all four modes for this deck in one screen */}
+        <button onClick={() => navigate(`/study/${deck.id}`)} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-med-primary px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:opacity-90 active:scale-95"><Layers className="h-4 w-4" /> Study room</button>
+      </div>
 
       <div className="mb-5 min-w-0">
         <div className="flex items-center gap-2">
@@ -2550,4 +2556,98 @@ function CompleteView({ session, deck, total, onRestart, onHome }) {
       </div>
     </div>
   );
+}
+
+// =============================================================================
+// UNIFIED STUDY ROOM ADAPTERS — additive exports ONLY (nothing above changed).
+// UnifiedStudyRoom.jsx renders one pane per mode for a single deck, keeping
+// all panes MOUNTED (CSS-hidden) so each session survives tab switches.
+// The wiring below mirrors the root component's closures 1:1, and everything
+// that matters (StudyView/GapView/QuizView SM-2 grading, schedule(), writers'
+// outbox enqueue) is the SAME code the module already runs — not a rewrite.
+// =============================================================================
+
+// Chrome: the same theme context + palette/dark CSS the module's Shell
+// injects, minus Shell's page container (the room owns its own layout).
+export function StudyRoomChrome({ children }) {
+  const { isDark } = useTheme();
+  return (
+    <ThemeCtx.Provider value={isDark}>
+      <style>{BRAND_CSS}</style>
+      <style>{PALETTE_CSS}</style>
+      {isDark && <style>{DARK_CSS}</style>}
+      <div className={isDark ? "dark text-slate-100" : "text-slate-800"}>{children}</div>
+    </ThemeCtx.Provider>
+  );
+}
+
+// One deck+mode study pane. mode: "flip" | "gap" | "quiz".
+// Owns its session state locally, so four panes coexist independently —
+// unlike the root component's single-session model.
+export function StudyPane({ deckId, mode }) {
+  const navigate = useNavigate();
+  const { loading, decks, srs, meta, writers } = useMedHubStore();
+  const srsSettings = meta.srsSettings || DEFAULT_SETTINGS;
+  const progress = meta.progress || {};
+  const studyActivity = meta.studyActivity || {};
+  const lastProg = meta.lastProg || {};
+  const [session, setSession] = useState(null);
+  const startedRef = useRef(false);
+
+  const deck = decks.find((d) => d.id === deckId) || null;
+
+  // ---- same wiring as the root component's helpers (fresh closures so the
+  // originals stay untouched; identical semantics) ----
+  const review = (id, grade) => { const changes = schedule(srs[id], grade, srsSettings); writers.patchCard(id, changes); return changes; };
+  const dueOf = (id) => srs[id]?.dueDate ?? srs[id]?.due ?? 0;
+  const sortByDue = (items) => [...items].sort((a, b) => dueOf(a.id) - dueOf(b.id));
+  const bump = (dId, fn) => { const cur = progress[dId] || blankProg(); writers.setMeta("progress", { ...progress, [dId]: { ...cur, ...fn(cur), lastStudied: Date.now() } }); };
+  const bumpActivity = () => { const k = dayKey(new Date()); writers.setMeta("studyActivity", { ...studyActivity, [k]: (studyActivity[k] || 0) + 1 }); };
+  const recordFlip = (id, grade) => { bump(id, (c) => ({ [grade]: (c[grade] || 0) + 1, reviews: c.reviews + 1 })); bumpActivity(); };
+  const recordQuiz = (id, ok) => { bump(id, (c) => ({ quizTotal: c.quizTotal + 1, quizCorrect: c.quizCorrect + (ok ? 1 : 0) })); bumpActivity(); };
+  const recordLast = (dId, m, summary) => writers.setMeta("lastProg", { ...lastProg, [dId]: { ...(lastProg[dId] || {}), [m]: { ...summary, when: Date.now() } } });
+
+  function start() {
+    const base = { deckId, mode, done: false, reinserts: {} };
+    if (mode === "flip") {
+      const cards = sortByDue(deck.cards);
+      setSession({ ...base, flipped: false, results: { again: 0, hard: 0, good: 0, easy: 0 }, cards, queue: cards.map((c) => c.id), total: cards.length, graduated: 0 });
+    } else if (mode === "gap") {
+      const cards = sortByDue(deck.gaps);
+      setSession({ ...base, revealed: false, typed: [], correct: 0, cards, queue: cards.map((c) => c.id), total: cards.length, graduated: 0 });
+    } else {
+      const quiz = [...buildQuiz(deck)].sort((a, b) => dueOf(a.id) - dueOf(b.id));
+      setSession({ ...base, selected: null, answered: false, correct: 0, quiz, queue: quiz.map((q) => q.id), total: quiz.length, graduated: 0 });
+    }
+  }
+
+  // Start exactly once when the deck is available. NEVER restarts on tab
+  // switches — the pane stays mounted, so the session (card 7/20, answers,
+  // reveals) persists until the room itself unmounts.
+  useEffect(() => {
+    if (loading || !deck || startedRef.current) return;
+    startedRef.current = true;
+    start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, deck]);
+
+  if (loading || !deck || !session) return null;
+
+  const total = mode === "quiz" ? session.quiz.length : session.cards.length;
+  if (session.done) {
+    return <CompleteView session={session} deck={deck} total={total} onRestart={start} onHome={() => navigate("/flashcards")} />;
+  }
+  if (mode === "flip") return <StudyView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />;
+  if (mode === "gap") return <GapView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />;
+  return <QuizView deck={deck} session={session} setSession={setSession} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />;
+}
+
+// Image-occlusion pane: same flatten-and-study component the module uses,
+// fed the deck's boards (its index state lives inside and survives hiding).
+export function OcclusionPane({ deckId }) {
+  const { loading, occlusions } = useMedHubStore();
+  if (loading) return null;
+  const cards = occlusions.filter((o) => o.projectId === deckId && (o.shapes?.length || 0) > 0);
+  if (!cards.length) return null;
+  return <OcclusionStudy cards={cards} />;
 }

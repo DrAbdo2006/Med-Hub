@@ -1,13 +1,29 @@
 -- ===========================================================================
--- Med Hub — migration 0003: lecture_progress constraints + RLS
+-- Med Hub — migration 0003: lecture_progress table + constraints + RLS
 --
--- Assumes the lecture_progress table already exists with columns:
---   user_id, lecture_id, course_id, mcq_score, mcq_total, is_completed,
---   last_accessed
---
--- This migration makes upserts safe and locks the table down per-user.
--- Run AFTER the table exists. Idempotent: safe to re-run (no-op if already set).
+-- Self-contained: creates public.lecture_progress (one row per user+lecture),
+-- then makes upserts safe and locks the table down per-user.
+-- Columns: user_id, lecture_id, course_id, mcq_score, mcq_total, is_completed,
+--          last_accessed.
+-- Idempotent: safe to re-run (IF NOT EXISTS / drop-and-recreate policies).
 -- ===========================================================================
+
+-- --- 0) Table --------------------------------------------------------------
+-- One row per (user, lecture). Types match the callers (LectureView upsert,
+-- PortalHome/CourseDetail selects) and the uuid PKs of auth.users / lectures /
+-- courses. FKs cascade so progress is cleaned up when a user/lecture/course is
+-- removed. mcq_score/mcq_total stay NULL until the lecture's quiz is taken.
+create table if not exists public.lecture_progress (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null references auth.users (id)    on delete cascade,
+  lecture_id    uuid not null references public.lectures (id) on delete cascade,
+  course_id     uuid          references public.courses (id)  on delete cascade,
+  mcq_score     integer,
+  mcq_total     integer,
+  is_completed  boolean     not null default false,
+  last_accessed timestamptz not null default now(),
+  created_at    timestamptz not null default now()
+);
 
 -- --- 1) UNIQUE on (user_id, lecture_id) -----------------------------------
 -- Required as the ON CONFLICT target for upserts (one row per user+lecture).

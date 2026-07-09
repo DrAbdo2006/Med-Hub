@@ -40,6 +40,7 @@ const PortalHome = lazy(() => import("./PortalHome"));
 const CourseDetail = lazy(() => import("./CourseDetail"));
 const LectureView = lazy(() => import("./LectureView"));
 const StudyModule = lazy(() => import("./StudyModule"));
+const UnifiedStudyRoom = lazy(() => import("./UnifiedStudyRoom"));
 const AdminDashboard = lazy(() => import("./AdminDashboard"));
 const Profile = lazy(() => import("./Profile"));
 
@@ -80,6 +81,8 @@ export default function App() {
                   Old bare /course URL redirects here so bookmarks keep working. */}
               <Route path="/flashcards" element={<StudyModule />} />
               <Route path="/course" element={<Navigate to="/flashcards" replace />} />
+              {/* Unified Study Room — all four modes for one deck, tabbed */}
+              <Route path="/study/:deckId" element={<UnifiedStudyRoom />} />
 
               {/* admin-only */}
               <Route element={<RequireAdmin />}>
