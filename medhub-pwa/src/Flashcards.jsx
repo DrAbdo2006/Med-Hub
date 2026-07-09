@@ -776,7 +776,7 @@ export default function App() {
         />
       ) : (
         <LibraryView
-          folders={folders} decks={decks} occlusions={occlusions} srs={srs}
+          folders={folders} decks={decks} occlusions={occlusions} srs={srs} progress={progress}
           onOpen={openProjectById} onCreateProject={createDeck} onRenameProject={renameDeck} onDeleteProject={deleteDeck} onPinProject={togglePinDeck} onSetFolder={setDeckFolder}
           onCreateFolder={createFolder} onRenameFolder={renameFolder} onSetFolderDesc={setFolderDesc} onDeleteFolder={deleteFolder} onRestoreFolder={restoreFolder} onPurgeFolder={purgeFolder} onPinFolder={togglePinFolder}
           onImportProject={importProjectData}
@@ -1725,67 +1725,38 @@ function OcclusionCard({ card, targetId, onNext }) {
 // ---------------------------------------------------------------------------
 function fmtWhen(ts) { return ts ? new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : null; }
 
-// Single accuracy row (correct / total) with a progress bar.
-function AccRow({ heading, correct, total, when }) {
-  const pct = total ? Math.round((correct / total) * 100) : 0;
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
-        <span className="font-medium">{heading}{total ? ` · ${correct}/${total} (${pct}%)` : ""}</span>
-        <span className="text-slate-400">{total ? (when ? fmtWhen(when) : "") : "no data"}</span>
-      </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-600" style={{ width: `${pct}%` }} /></div>
-    </div>
-  );
-}
-// All-time + last-session accuracy (used in Gaps & Quiz tabs).
-function TwoAcc({ label, allCorrect, allTotal, last }) {
-  return (
-    <div className="mb-4 space-y-2.5 rounded-lg bg-slate-50 p-3">
-      <AccRow heading={`All ${label.toLowerCase()} accuracy`} correct={allCorrect} total={allTotal} />
-      <AccRow heading="Last session" correct={last?.correct || 0} total={last?.total || 0} when={last?.when} />
-    </div>
-  );
-}
-
-// 4-rating mix row. `counts` = { again, hard, good, easy } press-tallies.
-// Bucketing rule: number of times each rating was pressed (same rule used by
-// CompleteView), so the per-project bar and the Complete screen always agree.
-// Renders four stacked segments from RATING_ORDER + fillHex(); empty-safe.
-function MixRow({ heading, counts, meta }) {
-  const tot = RATING_ORDER.reduce((n, r) => n + (counts[r] || 0), 0);
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
-        <span className="font-medium">{heading}</span>
-        <span className="flex items-center gap-1.5">
-          {tot ? RATING_ORDER.map((r) => <span key={r} className={`font-semibold ${textClass(r)}`}>{counts[r] || 0}{initial(r)}</span>) : <span className="text-slate-400">{meta}</span>}
-        </span>
-      </div>
-      <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-200">
-        {tot > 0 && RATING_ORDER.map((r) => <div key={r} style={{ width: `${((counts[r] || 0) / tot) * 100}%`, backgroundColor: fillHex(r) }} />)}
-      </div>
-    </div>
-  );
-}
-// All-time + last-session recall mix (per project). Buckets = rating press-tallies.
-function DeckProgress({ all, last }) {
-  const toCounts = (s) => ({ again: s?.again || 0, hard: s?.hard || 0, good: s?.good || 0, easy: s?.easy || 0 });
-  return (
-    <div className="mt-3 space-y-2.5 rounded-lg bg-slate-50 p-3">
-      <MixRow heading={`All progress${all?.reviews ? ` · ${all.reviews} reviews` : ""}`} counts={toCounts(all)} meta="not studied" />
-      <MixRow heading={`Last session${last?.when ? ` · ${fmtWhen(last.when)}` : ""}`} counts={toCounts(last)} meta="no data" />
-    </div>
-  );
-}
-
 // Local date key (YYYY-MM-DD) used by the study-activity tracker.
 const dayKey = (d) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
 
 // ---------------------------------------------------------------------------
 // Library  (single tab → Files (folders) → Projects (decks))
 // ---------------------------------------------------------------------------
-function ProjectCard({ deck, imageCount, srs, onOpen, onRename, onDelete, onPin, onExport, onMove }) {
+// ---------------------------------------------------------------------------
+// MasteryRing — compact SVG donut for the project list. The % derives from
+// the SAME `progress` press-tallies that fed the (now removed) in-project
+// DeckProgress bars: mastery = (good + easy) / total reviews — so the number
+// out here can never disagree with what the inside view used to show.
+// Never-studied / empty deck → 0% (guarded, never NaN).
+// ---------------------------------------------------------------------------
+const masteryPct = (p) => {
+  const reviews = p?.reviews || 0;
+  return reviews ? Math.round((((p.good || 0) + (p.easy || 0)) / reviews) * 100) : 0;
+};
+function MasteryRing({ pct }) {
+  const r = 15.5;
+  const c = 2 * Math.PI * r;
+  return (
+    <span className="relative inline-flex h-10 w-10 shrink-0 items-center justify-center" role="img" aria-label={`${pct}% mastery`} title={`${pct}% mastery`}>
+      <svg viewBox="0 0 40 40" className="h-10 w-10 -rotate-90" aria-hidden="true">
+        <circle cx="20" cy="20" r={r} fill="none" strokeWidth="4.5" className="stroke-slate-200 dark:stroke-white/10" />
+        <circle cx="20" cy="20" r={r} fill="none" strokeWidth="4.5" strokeLinecap="round" stroke="#1B98E0" strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} />
+      </svg>
+      <span className="absolute text-[9px] font-bold leading-none text-slate-600">{pct}%</span>
+    </span>
+  );
+}
+
+function ProjectCard({ deck, imageCount, srs, prog, onOpen, onRename, onDelete, onPin, onExport, onMove }) {
   const [renaming, setRenaming] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
   const due = dueCount(deck, srs);
@@ -1803,6 +1774,7 @@ function ProjectCard({ deck, imageCount, srs, onOpen, onRename, onDelete, onPin,
         </div>
         {/* Stats */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400 sm:shrink-0">
+          <MasteryRing pct={masteryPct(prog)} />
           <span className="flex items-center gap-1" title="Flashcards"><Layers className="h-3.5 w-3.5" />{deck.cards.length}</span>
           <span className="flex items-center gap-1" title="Gaps"><AlignLeft className="h-3.5 w-3.5" />{deck.gaps.length}</span>
           <span className="flex items-center gap-1" title="Images"><ImageIcon className="h-3.5 w-3.5" />{imageCount}</span>
@@ -1832,7 +1804,7 @@ function ProjectCard({ deck, imageCount, srs, onOpen, onRename, onDelete, onPin,
     </div>
   );
 }
-function LibraryView({ folders, decks, occlusions, srs, onOpen, onCreateProject, onRenameProject, onDeleteProject, onPinProject, onSetFolder, onCreateFolder, onRenameFolder, onSetFolderDesc, onDeleteFolder, onRestoreFolder, onPurgeFolder, onPinFolder, onImportProject }) {
+function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCreateProject, onRenameProject, onDeleteProject, onPinProject, onSetFolder, onCreateFolder, onRenameFolder, onSetFolderDesc, onDeleteFolder, onRestoreFolder, onPurgeFolder, onPinFolder, onImportProject }) {
   const dark = useContext(ThemeCtx);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -1975,7 +1947,7 @@ function LibraryView({ folders, decks, occlusions, srs, onOpen, onCreateProject,
           {g.folder && <div className="mb-3"><InlineDesc value={g.folder.description} onSave={(t) => onSetFolderDesc(g.folder.id, t)} placeholder="Add a file description…" /></div>}
           {g.items.length === 0 ? <p className="text-sm text-slate-400">No projects in this file yet. Use the file's “+” button above to add one.</p> : (
             <div className="flex flex-col gap-3">
-              {sortItems(g.items).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
+              {sortItems(g.items).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} prog={progress[deck.id]} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
             </div>
           )}
         </Collapsible>
@@ -2001,14 +1973,14 @@ function LibraryView({ folders, decks, occlusions, srs, onOpen, onCreateProject,
                 </div>
                 {items.length > 0 && (
                   <div className="flex flex-col gap-3">
-                    {sortItems(items).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
+                    {sortItems(items).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} prog={progress[deck.id]} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
                   </div>
                 )}
               </div>
             ))}
             {looseTrashed.length > 0 && (
               <div className="flex flex-col gap-3">
-                {sortItems(looseTrashed).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
+                {sortItems(looseTrashed).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} prog={progress[deck.id]} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
               </div>
             )}
           </div>
@@ -2076,27 +2048,6 @@ const PROJECT_TABS = [
 
 // Sticky, horizontally-scrollable tab switcher (same nav pattern as the portal:
 // LTR scroll, hidden scrollbar, ≥44px targets, no-shrink items).
-function ProjectTabs({ active, onSelect, counts }) {
-  return (
-    <div className="sticky top-0 z-10 -mx-4 mb-5 border-b border-slate-200 bg-white/90 px-4 backdrop-blur dark:border-white/10 dark:bg-[#0e172a]/90">
-      <nav dir="ltr" className="no-scrollbar flex items-center gap-1 overflow-x-auto whitespace-nowrap">
-        {PROJECT_TABS.map((t) => {
-          const on = active === t.key; const Icon = t.icon;
-          return (
-            <button key={t.key} onClick={() => onSelect(t.key)}
-              className={`relative flex min-h-[44px] shrink-0 items-center gap-1.5 px-3.5 text-sm font-medium transition-colors ${on ? "text-med-primary" : "text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-white"}`}>
-              <Icon className="h-4 w-4" /> {t.label}
-              <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[11px] font-semibold ${on ? "bg-med-primary-soft text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]" : "bg-slate-100 text-slate-400 dark:bg-white/10 dark:text-slate-400"}`}>{counts[t.key]}</span>
-              {on && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-med-primary" />}
-            </button>
-          );
-        })}
-      </nav>
-    </div>
-  );
-}
-
-// Prominent per-tab Study launcher (progress lives just above it in each panel).
 function StudyLauncher({ label, icon: Icon, accent, count, ready = true, onStudy, disabledHint }) {
   const can = ready && count > 0;
   return (
@@ -2127,7 +2078,6 @@ function FlashcardsPanel({ deck, prog, last, onStudy, onSaveCard, onBulkCards, o
   return (
     <div className="space-y-5">
       <div className={panelCard}>
-        <DeckProgress all={prog} last={last} />
         <StudyLauncher label="flashcards" icon={BookOpen} accent={deck.accent} count={deck.cards.length} onStudy={() => onStudy("flip")} disabledHint="Add a card to study" />
       </div>
       <CardForm key={formKey} initial={blankCard()} accent={deck.accent}
@@ -2168,7 +2118,6 @@ function GapsPanel({ deck, prog, last, onStudy, onSaveGap, onBulkGaps, onEditGap
   return (
     <div className="space-y-5">
       <div className={panelCard}>
-        <TwoAcc label="Gap" allCorrect={prog.gapCorrect} allTotal={prog.gapTotal} last={last} />
         <StudyLauncher label="the gaps" icon={AlignLeft} accent={deck.accent} count={deck.gaps.length} onStudy={() => onStudy("gap")} disabledHint="Add a gap to study" />
       </div>
       <GapForm key={formKey} initial={blankGap()}
@@ -2249,7 +2198,6 @@ function QuizPanel({ deck, prog, last, onStudy, onImportMcqs, onDeleteMcq }) {
   return (
     <div className="space-y-5">
       <div className={panelCard}>
-        <TwoAcc label="Quiz" allCorrect={prog.quizCorrect} allTotal={prog.quizTotal} last={last} />
         <StudyLauncher label="quiz" icon={ListChecks} accent={deck.accent} count={mcqs.length} ready={canQuiz(deck)} onStudy={() => onStudy("quiz")} disabledHint="Add a question to start" />
       </div>
       <McqForm accent={deck.accent} onSave={(m) => onImportMcqs(deck.id, [m])} onImportCsv={(list) => onImportMcqs(deck.id, list)} />
@@ -2312,7 +2260,27 @@ function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, o
         <div className="mt-1"><InlineDesc value={deck.description} onSave={(t) => onSetDesc(deck.id, t)} placeholder="Add a project description…" /></div>
       </div>
 
-      <ProjectTabs active={activeTab} onSelect={setActiveTab} counts={counts} />
+      {/* Mode dropdown (replaces the 4-button tab bar). Native <select> for
+          built-in keyboard + screen-reader behavior. It drives the SAME
+          activeTab state the buttons did — the panels below stay MOUNTED and
+          are only CSS-hidden, so form drafts and edit-modes survive switches. */}
+      <div className="mb-4 flex items-center gap-2">
+        <label htmlFor="fc-mode-select" className="text-sm font-medium text-slate-600">Mode:</label>
+        <div className="relative">
+          <select
+            id="fc-mode-select"
+            value={activeTab}
+            onChange={(e) => setActiveTab(e.target.value)}
+            className="min-h-[44px] appearance-none rounded-xl border border-slate-200 bg-white py-2 pl-4 pr-10 text-sm font-semibold text-slate-700 shadow-sm outline-none transition focus:border-med-primary focus:ring-2 focus:ring-med-primary/25"
+          >
+            <option value="flip">Flashcards ({counts.flip})</option>
+            <option value="gap">Gaps ({counts.gap})</option>
+            <option value="quiz">Quiz ({counts.quiz})</option>
+            <option value="images">Images ({counts.images})</option>
+          </select>
+          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+        </div>
+      </div>
 
       {/* All panels stay MOUNTED — hidden (not unmounted) — so form drafts and
           edit-mode survive tab switches. */}
