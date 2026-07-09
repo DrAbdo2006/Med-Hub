@@ -451,6 +451,16 @@ function fmtUntil(due) {
 }
 const isDue = (srs, id) => { const e = srs[id]; return !e || (e.dueDate ?? e.due ?? 0) <= Date.now(); };
 const dueCount = (deck, srs) => [...deck.cards, ...deck.gaps].filter((x) => isDue(srs, x.id)).length;
+// Round-robin interleave of several already-ordered lists into one mixed list,
+// so a mixed study queue alternates types instead of grouping them.
+function interleave(lists) {
+  const arrs = lists.filter((l) => l && l.length);
+  const out = [];
+  for (let i = 0; arrs.some((a) => i < a.length); i++) {
+    for (const a of arrs) if (i < a.length) out.push(a[i]);
+  }
+  return out;
+}
 
 const DEFAULT_PROFILE = { username: "Guest", email: "", picture: null, password: "", loggedIn: false };
 const DEFAULT_PREFS = { notifications: true, sound: false, autoPlay: false };
@@ -635,6 +645,18 @@ export default function App() {
     } else if (mode === "quiz") {
       const quiz = [...buildQuiz(deck)].sort((a, b) => dueOf(a.id) - dueOf(b.id));
       setSession({ ...base, selected: null, answered: false, correct: 0, quiz, queue: quiz.map((q) => q.id), total: quiz.length, graduated: 0 });
+    } else if (mode === "mixed") {
+      // Mixed Study Room: interleave DUE items across the SM-2 types (cards,
+      // gaps, MCQs) into ONE queue. Each entry carries its `type`; MixedView
+      // dispatches the right per-item UI. Occlusion image boards are NOT
+      // SM-2-scheduled in this app, so they aren't part of the due queue.
+      const dueCards = sortByDue(deck.cards).filter((c) => isDue(srs, c.id)).map((c) => ({ type: "flip", id: c.id }));
+      const dueGaps = sortByDue(deck.gaps).filter((g) => isDue(srs, g.id)).map((g) => ({ type: "gap", id: g.id }));
+      const quizItems = [...buildQuiz(deck)].sort((a, b) => dueOf(a.id) - dueOf(b.id));
+      const quizById = {};
+      const dueQuiz = quizItems.filter((q) => isDue(srs, q.id)).map((q) => { quizById[q.id] = q; return { type: "quiz", id: q.id }; });
+      const queue = interleave([dueCards, dueGaps, dueQuiz]);
+      setSession({ ...base, queue, index: 0, total: queue.length, quizById, results: { again: 0, hard: 0, good: 0, easy: 0 }, correct: 0, flipped: false, revealed: false, selected: null, answered: false, caughtUp: queue.length === 0 });
     }
   }
   const endSession = () => setSession(null);
@@ -741,12 +763,13 @@ export default function App() {
 
   if (session) {
     const deck = deckOf(session.deckId);
-    const total = session.mode === "quiz" ? session.quiz.length : session.cards.length;
+    const total = session.total ?? (session.mode === "quiz" ? session.quiz.length : session.cards?.length ?? 0);
     return wrap(
       <Shell>
         {/* Focus Study Mode: minimal top bar (Exit + progress only) */}
         <Header inStudy minimal onBack={endSession} backLabel="Exit" />
         {session.done ? <CompleteView session={session} deck={deck} total={total} onRestart={() => startSession(session.deckId, session.mode)} onHome={endSession} />
+          : session.mode === "mixed" ? <MixedView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecordFlip={recordFlip} onRecordQuiz={recordQuiz} onFinish={recordLast} onHome={endSession} />
           : session.mode === "flip" ? <StudyView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />
           : session.mode === "gap" ? <GapView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />
           : <QuizView deck={deck} session={session} setSession={setSession} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />}
@@ -1430,7 +1453,7 @@ function GapForm({ initial, onCancel, onSave, onBulk }) {
   return (
     <div className="rounded-2xl border-2 border-indigo-200 bg-indigo-50/40 p-5 shadow-sm">
       <Field label="Learning box" hint="Double-tap a word to make it a gap, or wrap it yourself in double braces: The {{heart}} pumps {{blood}}.">
-        <AutoTextarea innerRef={taRef} value={text} onChange={(e) => setText(e.target.value)} onDoubleClick={toggleGapAtCursor} onKeyDown={onKey} minRows={3} placeholder="The answer goes here — double-tap a word to hide it." className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
+        <AutoTextarea dir="auto" innerRef={taRef} value={text} onChange={(e) => setText(e.target.value)} onDoubleClick={toggleGapAtCursor} onKeyDown={onKey} minRows={3} placeholder="The answer goes here — double-tap a word to hide it." className="w-full rounded-lg border border-slate-200 bg-white p-3 text-sm leading-relaxed outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
       </Field>
       <Field label="Answer (full text, no gaps)">
         <div className="min-h-[3rem] rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{answer || <span className="text-slate-400">The complete sentence will appear here.</span>}</div>
@@ -1668,6 +1691,140 @@ function OcclusionEditor({ initial, onCancel, onSave }) {
     </div>
   );
 }
+// ---------------------------------------------------------------------------
+// Mixed Study Room — ONE interleaved queue of DUE items across the SM-2 types
+// (flashcards, cloze gaps, MCQs). A thin polymorphic dispatcher renders each
+// item by its `type`; ratings flow through the SAME review()/schedule() + sync
+// as every other mode. The SM-2 algorithm itself is untouched. (Occlusion image
+// boards aren't SM-2-scheduled, so they're studied from their own tab, not here.)
+// ---------------------------------------------------------------------------
+function MixedProgress({ index, total }) {
+  const pct = total ? Math.round((index / total) * 100) : 0;
+  return (
+    <div className="mx-auto mb-6 w-full max-w-2xl">
+      <div className="mb-1 flex items-center justify-between text-xs text-slate-400"><span>Mixed review</span><span>{Math.min(index + 1, total)} / {total}</span></div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-white/10"><div className="h-full rounded-full bg-med-primary transition-all" style={{ width: `${pct}%` }} /></div>
+    </div>
+  );
+}
+
+function AllCaughtUp({ onHome }) {
+  return (
+    <div className="mx-auto max-w-xl text-center">
+      <div className="rounded-3xl border border-slate-200 bg-white p-10 shadow-xl dark:border-white/10 dark:bg-white/5">
+        <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-med-primary to-[#0f5e8c] text-white shadow-lg"><CheckCircle2 className="h-8 w-8" /></div>
+        <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">All caught up!</h2>
+        <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">Nothing is due for review right now. Come back later, or add more questions to study.</p>
+        <button onClick={onHome} className="mt-7 inline-flex items-center gap-2 rounded-xl bg-med-primary px-5 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to project</button>
+      </div>
+    </div>
+  );
+}
+
+function MixedView({ deck, session, setSession, srs, settings, onReview, onRecordFlip, onRecordQuiz, onFinish, onHome }) {
+  const total = session.total || 0;
+  if (session.caughtUp || total === 0) return <AllCaughtUp onHome={onHome} />;
+  const item = session.queue[session.index];
+  if (!item) return <AllCaughtUp onHome={onHome} />;
+  const prev = srs[item.id];
+
+  // Advance to the next item, or finish. Carries the freshly-updated tallies.
+  function step(results, correct) {
+    const next = session.index + 1;
+    if (next >= session.queue.length) {
+      setSession({ ...session, results, correct, index: next, done: true });
+      onFinish(deck.id, "mixed", { again: results.again || 0, hard: results.hard || 0, good: results.good || 0, easy: results.easy || 0, total });
+    } else {
+      setSession({ ...session, results, correct, index: next, flipped: false, revealed: false, selected: null, answered: false });
+    }
+  }
+  // flashcards + gaps: manual SM-2 rating via the shared RatingButtons.
+  function rate(key) {
+    onReview(item.id, key);
+    onRecordFlip(deck.id, key);
+    step({ ...session.results, [key]: (session.results[key] || 0) + 1 }, session.correct);
+  }
+  // quiz: auto-grade (correct → good, wrong → again), same as QuizView.
+  const quiz = item.type === "quiz" ? session.quizById[item.id] : null;
+  function choose(opt) {
+    if (session.answered) return;
+    const ok = opt === quiz.answer;
+    onReview(item.id, ok ? "good" : "again");
+    onRecordQuiz(deck.id, ok);
+    setSession({ ...session, selected: opt, answered: true, results: { ...session.results, [ok ? "good" : "again"]: (session.results[ok ? "good" : "again"] || 0) + 1 }, correct: session.correct + (ok ? 1 : 0) });
+  }
+
+  const kindLabel = item.type === "flip" ? "Flashcard" : item.type === "gap" ? "Fill the gap" : "Quiz";
+  return (
+    <div className="pb-40">
+      <MixedProgress index={session.index} total={total} />
+      <div className="mx-auto w-full max-w-2xl">
+        <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-xl dark:border-white/10 dark:bg-white/5">
+          <span className="mb-5 inline-block rounded-full bg-med-primary-soft px-3 py-1 text-xs font-semibold uppercase tracking-wide text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]">{kindLabel}</span>
+
+          {item.type === "flip" && (() => {
+            const card = deck.cards.find((c) => c.id === item.id);
+            if (!card) return null;
+            return (
+              <>
+                <p dir="auto" className="text-xl font-medium leading-relaxed text-slate-900 sm:text-2xl dark:text-slate-50"><Md text={card.q} /></p>
+                {session.revealed && <p dir="auto" className="mt-4 border-t border-slate-100 pt-4 text-lg leading-relaxed text-med-primary dark:border-white/10 dark:text-[#63C4F1]"><Md text={card.a} /></p>}
+              </>
+            );
+          })()}
+
+          {item.type === "gap" && (() => {
+            const gap = deck.gaps.find((g) => g.id === item.id);
+            if (!gap) return null;
+            const parsed = parseGaps(gap.text);
+            return (
+              <p dir="auto" className="text-xl font-medium leading-relaxed text-slate-900 sm:text-2xl dark:text-slate-50">
+                {parsed.segments.map((s, i) => s.type === "text"
+                  ? <Md key={i} text={s.value} />
+                  : session.revealed
+                    ? <span key={i} className="mx-1 rounded-md bg-med-primary-soft px-2 py-0.5 font-bold text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]">{s.answer}</span>
+                    : <span key={i} className="mx-1 align-middle font-semibold text-med-subtle">[ … ]</span>)}
+              </p>
+            );
+          })()}
+
+          {item.type === "quiz" && quiz && (
+            <>
+              <p dir="auto" className="text-lg font-semibold leading-relaxed text-slate-900 sm:text-xl dark:text-slate-50">{quiz.q}</p>
+              <div className="mt-4 space-y-2.5">
+                {quiz.options.map((opt, i) => {
+                  const chosen = session.selected === opt;
+                  const correct = session.answered && opt === quiz.answer;
+                  const wrong = session.answered && chosen && opt !== quiz.answer;
+                  return (
+                    <button key={i} dir="auto" onClick={() => choose(opt)} disabled={session.answered}
+                      className={`flex w-full items-center gap-2 rounded-xl border px-4 py-3 text-left text-sm transition ${correct ? "border-emerald-400 bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15" : wrong ? "border-rose-400 bg-rose-50 text-rose-700 dark:bg-rose-500/15" : "border-slate-200 bg-white text-slate-800 hover:border-med-primary dark:border-white/15 dark:bg-white/5 dark:text-slate-200"}`}>
+                      <span className="flex-1">{opt}</span>
+                      {correct && <CheckCircle2 className="h-5 w-5 text-emerald-600" />}
+                      {wrong && <XCircle className="h-5 w-5 text-rose-500" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-4 py-4 shadow-[0_-4px_24px_rgba(15,23,42,0.07)] backdrop-blur dark:border-white/10">
+        <div className="mx-auto w-full max-w-2xl">
+          {(item.type === "flip" || item.type === "gap") && (session.revealed
+            ? <RatingButtons prev={prev} settings={settings} onGrade={rate} />
+            : <button onClick={() => setSession({ ...session, revealed: true, flipped: true })} className={`flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r ${deck.accent} px-4 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95`}><Lightbulb className="h-4 w-4" /> Reveal answer</button>)}
+          {item.type === "quiz" && (session.answered
+            ? <button onClick={() => step(session.results, session.correct)} className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 font-semibold text-white shadow-md transition hover:bg-slate-800 active:scale-95 dark:bg-white/10">{session.index + 1 >= total ? "Finish" : "Next"}</button>
+            : <p className="py-3 text-center text-sm text-slate-400">Choose the correct answer.</p>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function OcclusionStudy({ cards }) {
   // Anki "Hide All, Guess One": flatten so 1 shape = 1 study card.
   const items = cards.flatMap((card) => card.shapes.map((s) => ({ card, shapeId: s.id })));
@@ -2071,7 +2228,7 @@ function EmptyState({ icon: Icon, title, hint }) {
 const panelCard = "rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/5";
 const listRow = "flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5";
 
-function FlashcardsPanel({ deck, prog, last, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard }) {
+function FlashcardsPanel({ deck, prog, last, adding, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard }) {
   const [editing, setEditing] = useState(false);
   const [formKey, setFormKey] = useState(0);       // bump = reset draft AFTER a save/cancel only
   const reset = () => setFormKey((k) => k + 1);
@@ -2080,10 +2237,14 @@ function FlashcardsPanel({ deck, prog, last, onStudy, onSaveCard, onBulkCards, o
       <div className={panelCard}>
         <StudyLauncher label="flashcards" icon={BookOpen} accent={deck.accent} count={deck.cards.length} onStudy={() => onStudy("flip")} disabledHint="Add a card to study" />
       </div>
-      <CardForm key={formKey} initial={blankCard()} accent={deck.accent}
-        onSave={(card) => { onSaveCard(deck.id, card); reset(); }}
-        onBulk={(cards) => { onBulkCards(deck.id, cards); reset(); }}
-        onCancel={reset} />
+      {/* Creation form: hidden (not unmounted) when not adding, so a half-typed
+          card survives collapsing/reopening the creation hub. */}
+      <div className={adding ? "" : "hidden"}>
+        <CardForm key={formKey} initial={blankCard()} accent={deck.accent}
+          onSave={(card) => { onSaveCard(deck.id, card); reset(); }}
+          onBulk={(cards) => { onBulkCards(deck.id, cards); reset(); }}
+          onCancel={reset} />
+      </div>
       {deck.cards.length === 0
         ? <EmptyState icon={Layers} title="No flashcards yet" hint="Create your first card above — question on the front, answer on the back." />
         : (
@@ -2111,7 +2272,7 @@ function FlashcardsPanel({ deck, prog, last, onStudy, onSaveCard, onBulkCards, o
   );
 }
 
-function GapsPanel({ deck, prog, last, onStudy, onSaveGap, onBulkGaps, onEditGap, onDeleteGap }) {
+function GapsPanel({ deck, prog, last, adding, onStudy, onSaveGap, onBulkGaps, onEditGap, onDeleteGap }) {
   const [editing, setEditing] = useState(false);
   const [formKey, setFormKey] = useState(0);
   const reset = () => setFormKey((k) => k + 1);
@@ -2120,10 +2281,12 @@ function GapsPanel({ deck, prog, last, onStudy, onSaveGap, onBulkGaps, onEditGap
       <div className={panelCard}>
         <StudyLauncher label="the gaps" icon={AlignLeft} accent={deck.accent} count={deck.gaps.length} onStudy={() => onStudy("gap")} disabledHint="Add a gap to study" />
       </div>
-      <GapForm key={formKey} initial={blankGap()}
-        onSave={(gap) => { onSaveGap(deck.id, gap); reset(); }}
-        onBulk={(gaps) => { onBulkGaps(deck.id, gaps); reset(); }}
-        onCancel={reset} />
+      <div className={adding ? "" : "hidden"}>
+        <GapForm key={formKey} initial={blankGap()}
+          onSave={(gap) => { onSaveGap(deck.id, gap); reset(); }}
+          onBulk={(gaps) => { onBulkGaps(deck.id, gaps); reset(); }}
+          onCancel={reset} />
+      </div>
       {deck.gaps.length === 0
         ? <EmptyState icon={AlignLeft} title="No gaps yet" hint="Type a sentence above and double-tap a word (or wrap it in {{braces}}) to hide it." />
         : (
@@ -2192,7 +2355,7 @@ function McqForm({ accent, onSave, onImportCsv }) {
   );
 }
 
-function QuizPanel({ deck, prog, last, onStudy, onImportMcqs, onDeleteMcq }) {
+function QuizPanel({ deck, prog, last, adding, onStudy, onImportMcqs, onDeleteMcq }) {
   const [editing, setEditing] = useState(false);
   const mcqs = deck.mcqs || [];
   return (
@@ -2200,7 +2363,9 @@ function QuizPanel({ deck, prog, last, onStudy, onImportMcqs, onDeleteMcq }) {
       <div className={panelCard}>
         <StudyLauncher label="quiz" icon={ListChecks} accent={deck.accent} count={mcqs.length} ready={canQuiz(deck)} onStudy={() => onStudy("quiz")} disabledHint="Add a question to start" />
       </div>
-      <McqForm accent={deck.accent} onSave={(m) => onImportMcqs(deck.id, [m])} onImportCsv={(list) => onImportMcqs(deck.id, list)} />
+      <div className={adding ? "" : "hidden"}>
+        <McqForm accent={deck.accent} onSave={(m) => onImportMcqs(deck.id, [m])} onImportCsv={(list) => onImportMcqs(deck.id, list)} />
+      </div>
       {mcqs.length === 0
         ? <EmptyState icon={ListChecks} title="No quiz questions yet" hint="Write a question with options above, or bulk-import a CSV." />
         : (
@@ -2223,7 +2388,7 @@ function QuizPanel({ deck, prog, last, onStudy, onImportMcqs, onDeleteMcq }) {
   );
 }
 
-function ImagesPanel({ deck, occlusions, onStudyImages, onNewImage, onEditImage, onDeleteImage }) {
+function ImagesPanel({ deck, occlusions, adding, onStudyImages, onNewImage, onEditImage, onDeleteImage }) {
   const [editing, setEditing] = useState(false);
   return (
     <div className="space-y-5">
@@ -2231,7 +2396,9 @@ function ImagesPanel({ deck, occlusions, onStudyImages, onNewImage, onEditImage,
         <p className="text-sm text-slate-500 dark:text-slate-300">{occlusions.length} image card{occlusions.length === 1 ? "" : "s"} · cover words on a picture, then reveal them one by one.</p>
         <StudyLauncher label="images" icon={Eye} accent={deck.accent} count={occlusions.length} onStudy={() => onStudyImages(occlusions)} disabledHint="Create an image card to study" />
       </div>
-      <button onClick={onNewImage} className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-4 text-sm font-semibold text-med-primary transition hover:border-indigo-300 dark:border-white/10 dark:bg-white/5 dark:text-[#63C4F1]"><Plus className="h-4 w-4" /> New image card</button>
+      <div className={adding ? "" : "hidden"}>
+        <button onClick={onNewImage} className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-4 text-sm font-semibold text-med-primary transition hover:border-indigo-300 dark:border-white/10 dark:bg-white/5 dark:text-[#63C4F1]"><Plus className="h-4 w-4" /> New image card</button>
+      </div>
       {occlusions.length === 0
         ? <EmptyState icon={ImageIcon} title="No image cards yet" hint="Upload an image and draw boxes over the words you want to hide." />
         : <div className="space-y-3">{occlusions.map((occ) => <OccRow key={occ.id} occ={occ} editing onEdit={onEditImage} onDelete={onDeleteImage} onStudy={onStudyImages} />)}</div>}
@@ -2240,16 +2407,31 @@ function ImagesPanel({ deck, occlusions, onStudyImages, onNewImage, onEditImage,
 }
 
 function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, onSetDesc, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard, onSaveGap, onBulkGaps, onEditGap, onDeleteGap, onImportMcqs, onDeleteMcq, onNewImage, onEditImage, onDeleteImage, onStudyImages }) {
-  const navigate = useNavigate();   // → Unified Study Room (/study/:deckId)
   const [renaming, setRenaming] = useState(false);
   const [activeTab, setActiveTab] = useState("flip");
+  const [isAdding, setIsAdding] = useState(false);   // creation hub open?
   const p = progress[deck.id] || blankProg();
-  const counts = { flip: deck.cards.length, gap: deck.gaps.length, quiz: (deck.mcqs || []).length, images: occlusions.length };
+  const counts = { flip: deck.cards?.length || 0, gap: deck.gaps?.length || 0, quiz: (deck.mcqs || []).length, images: occlusions?.length || 0 };
+  const totalItems = counts.flip + counts.gap + counts.quiz + counts.images;
+  // Project-level empty state takes over ONLY when the whole project is empty
+  // AND the user hasn't opened the creation hub. Once content exists (or they're
+  // adding), the tabbed dashboard + per-tab empty states apply.
+  const showProjectEmpty = totalItems === 0 && !isAdding;
+
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-2">
         <button onClick={onBack} className="inline-flex items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to files</button>
-        <button onClick={() => navigate(`/study/${deck.id}`)} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-med-primary px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:opacity-90 active:scale-95"><Layers className="h-4 w-4" /> Study room</button>
+        {/* Populated only: mixed Study Room + a sleek "+" that toggles the
+            creation hub (draft-safe: forms are hidden, not unmounted). */}
+        <div className="flex items-center gap-2">
+          {totalItems > 0 && (
+            <button onClick={() => onStudy("mixed")} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-med-primary px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:opacity-90 active:scale-95"><Layers className="h-4 w-4" /> Study Room</button>
+          )}
+          {(totalItems > 0 || isAdding) && (
+            <button onClick={() => setIsAdding((v) => !v)} aria-pressed={isAdding} title={isAdding ? "Close creation hub" : "Add new question"} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm transition active:scale-95 ${isAdding ? "border-med-primary bg-med-primary/10 text-med-primary" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-white/15 dark:bg-white/5 dark:text-slate-300"}`}><Plus className={`h-5 w-5 transition-transform ${isAdding ? "rotate-45" : ""}`} /></button>
+          )}
+        </div>
       </div>
 
       <div className="mb-5 min-w-0">
@@ -2260,42 +2442,52 @@ function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, o
         <div className="mt-1"><InlineDesc value={deck.description} onSave={(t) => onSetDesc(deck.id, t)} placeholder="Add a project description…" /></div>
       </div>
 
-      {/* Mode dropdown (replaces the 4-button tab bar). Native <select> for
-          built-in keyboard + screen-reader behavior. It drives the SAME
-          activeTab state the buttons did — the panels below stay MOUNTED and
-          are only CSS-hidden, so form drafts and edit-modes survive switches. */}
-      <div className="mb-4 flex items-center gap-2">
-        <label htmlFor="fc-mode-select" className="text-sm font-medium text-slate-600">Mode:</label>
-        <div className="relative">
-          <select
-            id="fc-mode-select"
-            value={activeTab}
-            onChange={(e) => setActiveTab(e.target.value)}
-            className="min-h-[44px] appearance-none rounded-xl border border-slate-200 bg-white py-2 pl-4 pr-10 text-sm font-semibold text-slate-700 shadow-sm outline-none transition focus:border-med-primary focus:ring-2 focus:ring-med-primary/25"
-          >
-            <option value="flip">Flashcards ({counts.flip})</option>
-            <option value="gap">Gaps ({counts.gap})</option>
-            <option value="quiz">Quiz ({counts.quiz})</option>
-            <option value="images">Images ({counts.images})</option>
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+      {showProjectEmpty ? (
+        /* Brand-new project: hide mode dropdown, Study, and forms; ONE prominent
+           centered action to create the first question. */
+        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 py-16 text-center dark:border-white/10 dark:bg-white/5">
+          <div className="mb-4 rounded-2xl bg-med-primary-soft p-4 dark:bg-[#1B98E0]/20"><Layers className="h-7 w-7 text-med-primary dark:text-[#63C4F1]" /></div>
+          <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">This project is empty</h3>
+          <p className="mt-1 max-w-sm text-sm text-slate-500 dark:text-slate-400">Add flashcards, gaps, quiz questions, or an image card to start studying.</p>
+          <button onClick={() => setIsAdding(true)} className="mt-6 inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-med-primary px-6 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95"><Plus className="h-4 w-4" /> Add Questions</button>
         </div>
-      </div>
+      ) : (
+        <>
+          {/* Mode dropdown — native <select> for keyboard + screen-reader
+              behavior. Panels stay MOUNTED and are only CSS-hidden, so drafts
+              and edit-modes survive switches. */}
+          <div className="mb-4 flex items-center gap-2">
+            <label htmlFor="fc-mode-select" className="text-sm font-medium text-slate-600 dark:text-slate-300">Mode:</label>
+            <div className="relative">
+              <select
+                id="fc-mode-select"
+                value={activeTab}
+                onChange={(e) => setActiveTab(e.target.value)}
+                className="min-h-[44px] appearance-none rounded-xl border border-slate-200 bg-white py-2 pl-4 pr-10 text-sm font-semibold text-slate-700 shadow-sm outline-none transition focus:border-med-primary focus:ring-2 focus:ring-med-primary/25"
+              >
+                <option value="flip">Flashcards ({counts.flip})</option>
+                <option value="gap">Gaps ({counts.gap})</option>
+                <option value="quiz">Quiz ({counts.quiz})</option>
+                <option value="images">Images ({counts.images})</option>
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+            </div>
+          </div>
 
-      {/* All panels stay MOUNTED — hidden (not unmounted) — so form drafts and
-          edit-mode survive tab switches. */}
-      <div className={activeTab === "flip" ? "" : "hidden"}>
-        <FlashcardsPanel deck={deck} prog={p} last={lastProg[deck.id]?.flip} onStudy={onStudy} onSaveCard={onSaveCard} onBulkCards={onBulkCards} onEditCard={onEditCard} onDeleteCard={onDeleteCard} />
-      </div>
-      <div className={activeTab === "gap" ? "" : "hidden"}>
-        <GapsPanel deck={deck} prog={p} last={lastProg[deck.id]?.gap} onStudy={onStudy} onSaveGap={onSaveGap} onBulkGaps={onBulkGaps} onEditGap={onEditGap} onDeleteGap={onDeleteGap} />
-      </div>
-      <div className={activeTab === "quiz" ? "" : "hidden"}>
-        <QuizPanel deck={deck} prog={p} last={lastProg[deck.id]?.quiz} onStudy={onStudy} onImportMcqs={onImportMcqs} onDeleteMcq={onDeleteMcq} />
-      </div>
-      <div className={activeTab === "images" ? "" : "hidden"}>
-        <ImagesPanel deck={deck} occlusions={occlusions} onStudyImages={onStudyImages} onNewImage={onNewImage} onEditImage={onEditImage} onDeleteImage={onDeleteImage} />
-      </div>
+          <div className={activeTab === "flip" ? "" : "hidden"}>
+            <FlashcardsPanel deck={deck} prog={p} last={lastProg[deck.id]?.flip} adding={isAdding} onStudy={onStudy} onSaveCard={onSaveCard} onBulkCards={onBulkCards} onEditCard={onEditCard} onDeleteCard={onDeleteCard} />
+          </div>
+          <div className={activeTab === "gap" ? "" : "hidden"}>
+            <GapsPanel deck={deck} prog={p} last={lastProg[deck.id]?.gap} adding={isAdding} onStudy={onStudy} onSaveGap={onSaveGap} onBulkGaps={onBulkGaps} onEditGap={onEditGap} onDeleteGap={onDeleteGap} />
+          </div>
+          <div className={activeTab === "quiz" ? "" : "hidden"}>
+            <QuizPanel deck={deck} prog={p} last={lastProg[deck.id]?.quiz} adding={isAdding} onStudy={onStudy} onImportMcqs={onImportMcqs} onDeleteMcq={onDeleteMcq} />
+          </div>
+          <div className={activeTab === "images" ? "" : "hidden"}>
+            <ImagesPanel deck={deck} occlusions={occlusions} adding={isAdding} onStudyImages={onStudyImages} onNewImage={onNewImage} onEditImage={onEditImage} onDeleteImage={onDeleteImage} />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2641,11 +2833,11 @@ function CompleteView({ session, deck, total, onRestart, onHome }) {
   const mode = session.mode;
   // Flip AND gap modes → all four SM-2 ratings (from RATING_ORDER, so it can't
   // go stale). Both now use the shared Reveal→Rate flow. Quiz keeps correct/missed.
-  const stats = (mode === "flip" || mode === "gap")
+  const stats = (mode === "flip" || mode === "gap" || mode === "mixed")
     ? RATING_ORDER.map((r) => ({ label: RATING_META[r].label, value: session.results?.[r] || 0, color: textClass(r), bg: softBgClass(r) }))
     : [{ label: "Correct", value: session.correct, color: "text-emerald-600", bg: "bg-emerald-50" }, { label: "Missed", value: total - session.correct, color: "text-rose-600", bg: "bg-rose-50" }, { label: "Total", value: total, color: "text-slate-700", bg: "bg-slate-50" }];
-  const titles = { flip: "Study Complete!", gap: "Gaps Complete!", quiz: "Quiz Complete!" };
-  const nouns = { flip: "cards", gap: "gaps", quiz: "questions" };
+  const titles = { flip: "Study Complete!", gap: "Gaps Complete!", quiz: "Quiz Complete!", mixed: "Session Complete!" };
+  const nouns = { flip: "cards", gap: "gaps", quiz: "questions", mixed: "reviews" };
   return (
     <div className="mx-auto max-w-xl text-center">
       <div className="rounded-3xl border border-slate-200 bg-white p-10 shadow-xl">
