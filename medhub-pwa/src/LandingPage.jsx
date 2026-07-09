@@ -204,10 +204,6 @@ const LANDING_CSS = `
   font-size: clamp(1.05rem, 2.4vw, 1.35rem);
   line-height: 1.9; color: var(--l-text-soft);
 }
-.mh-landing .mh-hero-ctas {
-  margin-top: 2.4rem;
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.9rem;
-}
 
 /* primary button — bold 18px white on #1B98E0→#1577B0 gradient (large-text AA).
    Transform (hover scale / magnetic pull) is owned entirely by framer-motion
@@ -460,7 +456,6 @@ export default function LandingPage() {
   });
   const progressScaleX = reduced ? scrollYProgress : progressSpring;
 
-  const heroMagnetic = useMagnetic(16, reduced);
   const ctaMagnetic = useMagnetic(16, reduced);
 
   return (
@@ -513,20 +508,6 @@ export default function LandingPage() {
             <motion.p className="mh-hero-sub" variants={fadeUp}>
               المكان اللي يتحول بيه الطب.. لقصة ممتعة ومفهومة.
             </motion.p>
-            <motion.div className="mh-hero-ctas" variants={fadeUp}>
-              <motion.button
-                type="button"
-                onClick={goToCta}
-                className="mh-btn-primary"
-                style={heroMagnetic.style}
-                onPointerMove={heroMagnetic.onPointerMove}
-                onPointerLeave={heroMagnetic.onPointerLeave}
-                whileHover={reduced ? undefined : { scale: 1.04 }}
-                whileTap={reduced ? undefined : { scale: 0.97 }}
-              >
-                {session ? " أبدأ الآن" : "ابدأ الآن"}
-              </motion.button>
-            </motion.div>
           </motion.div>
         </section>
 

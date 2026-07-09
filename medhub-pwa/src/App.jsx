@@ -44,6 +44,27 @@ const UnifiedStudyRoom = lazy(() => import("./UnifiedStudyRoom"));
 const AdminDashboard = lazy(() => import("./AdminDashboard"));
 const Profile = lazy(() => import("./Profile"));
 
+// Root gate for "/". Authenticated users skip the marketing landing and go
+// straight to the dashboard. Critically, it waits for the ASYNC session check
+// to RESOLVE (loading) before deciding: on first render the session is still
+// loading (not "logged out"), so gating on `loading` avoids both the
+// logged-in-user landing flash and any redirect loop. AuthProvider already
+// subscribes to onAuthStateChange, so this re-renders the moment auth is
+// confirmed. Scoped to "/" ONLY — deep links stay under ProtectedRoute, so a
+// logged-in user opening /lecture/123 lands there, not the dashboard.
+function RootRoute() {
+  const { session, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-med-bg dark:bg-[#0e172a]">
+        <div className="h-10 w-10 rounded-full border-2 border-med-primary/30 border-t-med-primary animate-spin" />
+      </div>
+    );
+  }
+  if (session) return <Navigate to="/dashboard" replace />;
+  return <LandingPage />;
+}
+
 // Admin gate. Waits for the auth/profile check to resolve (so it never flashes
 // the admin UI before the role is known), then redirects non-admins home.
 function RequireAdmin() {
@@ -67,8 +88,9 @@ export default function App() {
             (retry/reload), so a flaky network or a fresh deploy never white-screens. */}
         <RouteBoundary>
           <Routes>
-            {/* public — the landing page must stay OUTSIDE the auth guard */}
-            <Route path="/" element={<LandingPage />} />
+            {/* public — landing stays OUTSIDE the auth guard; RootRoute only
+                auto-forwards ALREADY-authenticated visitors to the dashboard */}
+            <Route path="/" element={<RootRoute />} />
             <Route path="/login" element={<AuthPage />} />
 
             {/* protected */}

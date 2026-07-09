@@ -15,6 +15,7 @@ import {
   HeartPulse,
   ArrowLeft,
   RotateCcw,
+  Check,
   CheckCircle2,
   XCircle,
   Trophy,
@@ -768,8 +769,8 @@ export default function App() {
           progress={progress} lastProg={lastProg}
           onBack={() => setOpenProjectId(null)} onRename={renameDeck} onSetDesc={setDeckDesc}
           onStudy={(mode) => startSession(openProject.id, mode)}
-          onAddCard={() => setEditor({ deckId: openProject.id, card: blankCard() })} onEditCard={(card) => setEditor({ deckId: openProject.id, card })} onDeleteCard={deleteCard}
-          onAddGap={() => setGapEditor({ deckId: openProject.id, gap: blankGap() })} onEditGap={(gap) => setGapEditor({ deckId: openProject.id, gap })} onDeleteGap={deleteGap}
+          onSaveCard={upsertCard} onBulkCards={addCards} onEditCard={(card) => setEditor({ deckId: openProject.id, card })} onDeleteCard={deleteCard}
+          onSaveGap={upsertGap} onBulkGaps={addGaps} onEditGap={(gap) => setGapEditor({ deckId: openProject.id, gap })} onDeleteGap={deleteGap}
           onImportMcqs={importMcqs} onDeleteMcq={deleteMcq}
           onNewImage={() => setOccEditor(blankOcc(openProject.id))} onEditImage={(o) => setOccEditor(o)} onDeleteImage={deleteOcc} onStudyImages={(cards) => setOccStudy({ cards })}
         />
@@ -2060,32 +2061,246 @@ function Section({ icon: Icon, title, subtitle, accent, action, children }) {
     </div>
   );
 }
-function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, onSetDesc, onStudy, onAddCard, onEditCard, onDeleteCard, onAddGap, onEditGap, onDeleteGap, onImportMcqs, onDeleteMcq, onNewImage, onEditImage, onDeleteImage, onStudyImages }) {
-  const navigate = useNavigate();   // → Unified Study Room (/study/:deckId)
-  const [renaming, setRenaming] = useState(false);
-  const [importMsg, setImportMsg] = useState(null);
-  // Per-section Edit Mode toggles (hide row edit/delete icons until active).
-  const [isEditingFlashcards, setIsEditingFlashcards] = useState(false);
-  const [isEditingGaps, setIsEditingGaps] = useState(false);
-  const [isEditingQuiz, setIsEditingQuiz] = useState(false);
-  const [isEditingImages, setIsEditingImages] = useState(false);
-  const p = progress[deck.id] || blankProg();
-  const mcqs = deck.mcqs || [];
-  const quizReady = canQuiz(deck);
-  function handleCsv(file) {
+// ---------------------------------------------------------------------------
+// Unified Project Dashboard — one screen, four tabs (Study Room + Creation Hub
+// merged). Tabs stay MOUNTED and toggle with CSS `hidden` so each tab's form
+// draft + edit-mode survive switching away and back. The SM-2 study session is
+// root state (App), so it persists independently while you edit.
+// ---------------------------------------------------------------------------
+const PROJECT_TABS = [
+  { key: "flip",   label: "Flashcards",    icon: Layers },
+  { key: "gap",    label: "Fill the Gaps", icon: AlignLeft },
+  { key: "quiz",   label: "Quiz (MCQs)",   icon: ListChecks },
+  { key: "images", label: "Images",        icon: ImageIcon },
+];
+
+// Sticky, horizontally-scrollable tab switcher (same nav pattern as the portal:
+// LTR scroll, hidden scrollbar, ≥44px targets, no-shrink items).
+function ProjectTabs({ active, onSelect, counts }) {
+  return (
+    <div className="sticky top-0 z-10 -mx-4 mb-5 border-b border-slate-200 bg-white/90 px-4 backdrop-blur dark:border-white/10 dark:bg-[#0e172a]/90">
+      <nav dir="ltr" className="no-scrollbar flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+        {PROJECT_TABS.map((t) => {
+          const on = active === t.key; const Icon = t.icon;
+          return (
+            <button key={t.key} onClick={() => onSelect(t.key)}
+              className={`relative flex min-h-[44px] shrink-0 items-center gap-1.5 px-3.5 text-sm font-medium transition-colors ${on ? "text-med-primary" : "text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-white"}`}>
+              <Icon className="h-4 w-4" /> {t.label}
+              <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[11px] font-semibold ${on ? "bg-med-primary-soft text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]" : "bg-slate-100 text-slate-400 dark:bg-white/10 dark:text-slate-400"}`}>{counts[t.key]}</span>
+              {on && <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-med-primary" />}
+            </button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
+
+// Prominent per-tab Study launcher (progress lives just above it in each panel).
+function StudyLauncher({ label, icon: Icon, accent, count, ready = true, onStudy, disabledHint }) {
+  const can = ready && count > 0;
+  return (
+    <button onClick={onStudy} disabled={!can}
+      className={`mt-4 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-md transition active:scale-95 ${can ? `bg-gradient-to-r ${accent} hover:opacity-90` : "cursor-not-allowed bg-slate-300 dark:bg-white/10 dark:text-slate-400"}`}>
+      <Icon className="h-4 w-4" /> {can ? `Study ${label}` : (disabledHint || "Nothing to study yet")}
+    </button>
+  );
+}
+
+// Friendly, on-brand empty state shown when a tab has no items yet.
+function EmptyState({ icon: Icon, title, hint }) {
+  return (
+    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 py-12 text-center dark:border-white/10 dark:bg-white/5">
+      <div className="mb-3 rounded-2xl bg-med-primary-soft p-3 dark:bg-[#1B98E0]/20"><Icon className="h-6 w-6 text-med-primary dark:text-[#63C4F1]" /></div>
+      <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">{title}</h3>
+      <p className="mt-1 max-w-xs text-xs text-slate-500 dark:text-slate-400">{hint}</p>
+    </div>
+  );
+}
+const panelCard = "rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/5";
+const listRow = "flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5";
+
+function FlashcardsPanel({ deck, prog, last, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard }) {
+  const [editing, setEditing] = useState(false);
+  const [formKey, setFormKey] = useState(0);       // bump = reset draft AFTER a save/cancel only
+  const reset = () => setFormKey((k) => k + 1);
+  return (
+    <div className="space-y-5">
+      <div className={panelCard}>
+        <DeckProgress all={prog} last={last} />
+        <StudyLauncher label="flashcards" icon={BookOpen} accent={deck.accent} count={deck.cards.length} onStudy={() => onStudy("flip")} disabledHint="Add a card to study" />
+      </div>
+      <CardForm key={formKey} initial={blankCard()} accent={deck.accent}
+        onSave={(card) => { onSaveCard(deck.id, card); reset(); }}
+        onBulk={(cards) => { onBulkCards(deck.id, cards); reset(); }}
+        onCancel={reset} />
+      {deck.cards.length === 0
+        ? <EmptyState icon={Layers} title="No flashcards yet" hint="Create your first card above — question on the front, answer on the back." />
+        : (
+          <div>
+            <div className="mb-2 flex items-center justify-between"><p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{deck.cards.length} card{deck.cards.length === 1 ? "" : "s"}</p><EditToggle editing={editing} onToggle={() => setEditing((v) => !v)} /></div>
+            <div className="space-y-2">
+              {deck.cards.map((card, i) => (
+                <div key={card.id} className={listRow}>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-slate-200 text-[11px] font-semibold text-slate-500">{i + 1}</span><p className="truncate text-sm font-medium text-slate-800">{card.q}</p></div>
+                    <p className="truncate pl-7 text-xs text-slate-500">{card.a}</p>
+                  </div>
+                  {editing && (
+                    <div className="flex shrink-0 gap-1.5">
+                      <button onClick={() => onEditCard(card)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:text-slate-900"><Pencil className="h-3.5 w-3.5" /></button>
+                      <button onClick={() => onDeleteCard(deck.id, card.id)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+    </div>
+  );
+}
+
+function GapsPanel({ deck, prog, last, onStudy, onSaveGap, onBulkGaps, onEditGap, onDeleteGap }) {
+  const [editing, setEditing] = useState(false);
+  const [formKey, setFormKey] = useState(0);
+  const reset = () => setFormKey((k) => k + 1);
+  return (
+    <div className="space-y-5">
+      <div className={panelCard}>
+        <TwoAcc label="Gap" allCorrect={prog.gapCorrect} allTotal={prog.gapTotal} last={last} />
+        <StudyLauncher label="the gaps" icon={AlignLeft} accent={deck.accent} count={deck.gaps.length} onStudy={() => onStudy("gap")} disabledHint="Add a gap to study" />
+      </div>
+      <GapForm key={formKey} initial={blankGap()}
+        onSave={(gap) => { onSaveGap(deck.id, gap); reset(); }}
+        onBulk={(gaps) => { onBulkGaps(deck.id, gaps); reset(); }}
+        onCancel={reset} />
+      {deck.gaps.length === 0
+        ? <EmptyState icon={AlignLeft} title="No gaps yet" hint="Type a sentence above and double-tap a word (or wrap it in {{braces}}) to hide it." />
+        : (
+          <div>
+            <div className="mb-2 flex items-center justify-between"><p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{deck.gaps.length} gap{deck.gaps.length === 1 ? "" : "s"}</p><EditToggle editing={editing} onToggle={() => setEditing((v) => !v)} /></div>
+            <div className="space-y-2">
+              {deck.gaps.map((gap) => { const parsed = parseGaps(gap.text); return (
+                <div key={gap.id} className={listRow}>
+                  <p dir="auto" className="min-w-0 flex-1 text-sm text-slate-700">{parsed.segments.map((s, i) => s.type === "text" ? <span key={i}>{s.value}</span> : <span key={i} className="mx-0.5 rounded bg-med-primary-soft px-1.5 py-0.5 font-semibold text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]">{s.answer}</span>)}</p>
+                  {editing && (
+                    <div className="flex shrink-0 gap-1.5">
+                      <button onClick={() => onEditGap(gap)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:text-slate-900"><Pencil className="h-3.5 w-3.5" /></button>
+                      <button onClick={() => onDeleteGap(deck.id, gap.id)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>
+                    </div>
+                  )}
+                </div>
+              ); })}
+            </div>
+          </div>
+        )}
+    </div>
+  );
+}
+
+// Inline single-MCQ creator (self-resets on save; stays mounted so the draft
+// survives tab switches). Bulk CSV import kept alongside.
+function McqForm({ accent, onSave, onImportCsv }) {
+  const [q, setQ] = useState("");
+  const [opts, setOpts] = useState(["", "", "", ""]);
+  const [correct, setCorrect] = useState(0);
+  const [msg, setMsg] = useState(null);
+  const filled = opts.map((o) => o.trim()).filter(Boolean);
+  const valid = q.trim() && filled.length >= 2 && opts[correct]?.trim();
+  function save() {
+    if (!valid) return;
+    onSave({ q: q.trim(), options: opts.map((o) => o.trim()).filter(Boolean), answer: opts[correct].trim() });
+    setQ(""); setOpts(["", "", "", ""]); setCorrect(0);
+  }
+  function csv(file) {
     if (!file) return;
     readText(file, (text) => {
       const parsed = csvToMcqs(text);
-      if (parsed.length) { onImportMcqs(deck.id, parsed); setImportMsg({ ok: true, text: `Imported ${parsed.length} question${parsed.length === 1 ? "" : "s"}.` }); }
-      else setImportMsg({ ok: false, text: "No valid rows found. Expected: Question, Option A, B, C, D, Correct Answer." });
-      setTimeout(() => setImportMsg(null), 4000);
+      if (parsed.length) { onImportCsv(parsed); setMsg({ ok: true, text: `Imported ${parsed.length} question${parsed.length === 1 ? "" : "s"}.` }); }
+      else setMsg({ ok: false, text: "No valid rows. Expected: Question, Option A, B, C, D, Correct Answer." });
+      setTimeout(() => setMsg(null), 4000);
     });
   }
+  return (
+    <div className="rounded-2xl border-2 border-indigo-200 bg-indigo-50/40 p-5 shadow-sm">
+      <Field label="Question"><AutoTextarea dir="auto" value={q} onChange={(e) => setQ(e.target.value)} minRows={2} placeholder="The question to ask." className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" /></Field>
+      <p className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-400">Options (tap the circle to mark the correct one)</p>
+      <div className="space-y-2">
+        {opts.map((o, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <button type="button" onClick={() => setCorrect(i)} aria-label={`Mark option ${i + 1} correct`} className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition ${correct === i ? "border-med-primary bg-med-primary text-white" : "border-slate-300 text-transparent"}`}><Check className="h-3 w-3" /></button>
+            <input dir="auto" value={o} onChange={(e) => setOpts((arr) => arr.map((x, j) => (j === i ? e.target.value : x)))} placeholder={`Option ${i + 1}`} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100" />
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center gap-2">
+        <button disabled={!valid} onClick={save} className={`flex items-center gap-1.5 rounded-lg bg-gradient-to-r ${accent} px-4 py-2 text-sm font-semibold text-white shadow transition active:scale-95 ${valid ? "hover:opacity-90" : "cursor-not-allowed opacity-40"}`}><Save className="h-4 w-4" /> Save question</button>
+        <label title="Import MCQs from a .csv file" className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"><Upload className="h-4 w-4" /> Import CSV<input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => { csv(e.target.files?.[0]); e.target.value = ""; }} /></label>
+      </div>
+      {msg && <p className={`mt-2 text-xs font-medium ${msg.ok ? "text-emerald-600" : "text-rose-500"}`}>{msg.text}</p>}
+    </div>
+  );
+}
+
+function QuizPanel({ deck, prog, last, onStudy, onImportMcqs, onDeleteMcq }) {
+  const [editing, setEditing] = useState(false);
+  const mcqs = deck.mcqs || [];
+  return (
+    <div className="space-y-5">
+      <div className={panelCard}>
+        <TwoAcc label="Quiz" allCorrect={prog.quizCorrect} allTotal={prog.quizTotal} last={last} />
+        <StudyLauncher label="quiz" icon={ListChecks} accent={deck.accent} count={mcqs.length} ready={canQuiz(deck)} onStudy={() => onStudy("quiz")} disabledHint="Add a question to start" />
+      </div>
+      <McqForm accent={deck.accent} onSave={(m) => onImportMcqs(deck.id, [m])} onImportCsv={(list) => onImportMcqs(deck.id, list)} />
+      {mcqs.length === 0
+        ? <EmptyState icon={ListChecks} title="No quiz questions yet" hint="Write a question with options above, or bulk-import a CSV." />
+        : (
+          <div>
+            <div className="mb-2 flex items-center justify-between"><p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{mcqs.length} question{mcqs.length === 1 ? "" : "s"}</p><EditToggle editing={editing} onToggle={() => setEditing((v) => !v)} /></div>
+            <div className="space-y-2">
+              {mcqs.map((m, i) => (
+                <div key={m.id} className={listRow}>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-slate-200 text-[11px] font-semibold text-slate-500">{i + 1}</span><p className="truncate text-sm font-medium text-slate-800">{m.q}</p></div>
+                    <p className="truncate pl-7 text-xs text-slate-500">{m.options.length} options · answer: <span className="font-medium text-emerald-600">{m.answer}</span></p>
+                  </div>
+                  {editing && <button onClick={() => onDeleteMcq(deck.id, m.id)} className="shrink-0 rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+    </div>
+  );
+}
+
+function ImagesPanel({ deck, occlusions, onStudyImages, onNewImage, onEditImage, onDeleteImage }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="space-y-5">
+      <div className={panelCard}>
+        <p className="text-sm text-slate-500 dark:text-slate-300">{occlusions.length} image card{occlusions.length === 1 ? "" : "s"} · cover words on a picture, then reveal them one by one.</p>
+        <StudyLauncher label="images" icon={Eye} accent={deck.accent} count={occlusions.length} onStudy={() => onStudyImages(occlusions)} disabledHint="Create an image card to study" />
+      </div>
+      <button onClick={onNewImage} className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-4 text-sm font-semibold text-med-primary transition hover:border-indigo-300 dark:border-white/10 dark:bg-white/5 dark:text-[#63C4F1]"><Plus className="h-4 w-4" /> New image card</button>
+      {occlusions.length === 0
+        ? <EmptyState icon={ImageIcon} title="No image cards yet" hint="Upload an image and draw boxes over the words you want to hide." />
+        : <div className="space-y-3">{occlusions.map((occ) => <OccRow key={occ.id} occ={occ} editing onEdit={onEditImage} onDelete={onDeleteImage} onStudy={onStudyImages} />)}</div>}
+    </div>
+  );
+}
+
+function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, onSetDesc, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard, onSaveGap, onBulkGaps, onEditGap, onDeleteGap, onImportMcqs, onDeleteMcq, onNewImage, onEditImage, onDeleteImage, onStudyImages }) {
+  const navigate = useNavigate();   // → Unified Study Room (/study/:deckId)
+  const [renaming, setRenaming] = useState(false);
+  const [activeTab, setActiveTab] = useState("flip");
+  const p = progress[deck.id] || blankProg();
+  const counts = { flip: deck.cards.length, gap: deck.gaps.length, quiz: (deck.mcqs || []).length, images: occlusions.length };
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-2">
         <button onClick={onBack} className="inline-flex items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to files</button>
-        {/* Unified Study Room — all four modes for this deck in one screen */}
         <button onClick={() => navigate(`/study/${deck.id}`)} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-med-primary px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:opacity-90 active:scale-95"><Layers className="h-4 w-4" /> Study room</button>
       </div>
 
@@ -2097,100 +2312,22 @@ function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, o
         <div className="mt-1"><InlineDesc value={deck.description} onSave={(t) => onSetDesc(deck.id, t)} placeholder="Add a project description…" /></div>
       </div>
 
-      {/* Flashcards */}
-      <Section icon={Layers} title="Flashcards" subtitle={`${deck.cards.length} ${deck.cards.length === 1 ? "card" : "cards"}`} accent={deck.accent} defaultOpen={false}
-        action={<>
-          <button onClick={onAddCard} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"><Plus className="h-4 w-4" /> Add</button>
-          {deck.cards.length > 0 && <EditToggle editing={isEditingFlashcards} onToggle={() => setIsEditingFlashcards((v) => !v)} />}
-          <button onClick={() => onStudy("flip")} disabled={!deck.cards.length} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-md transition active:scale-95 ${deck.cards.length ? `bg-gradient-to-r ${deck.accent} hover:opacity-90` : "cursor-not-allowed bg-slate-300"}`}><BookOpen className="h-4 w-4" /> Study</button>
-        </>}>
-        <DeckProgress all={p} last={lastProg[deck.id]?.flip} />
-        {deck.cards.length === 0 ? <p className="text-sm text-slate-400">No cards yet. Use “Add”.</p> : isEditingFlashcards && (
-          <div className="space-y-2">
-            {deck.cards.map((card, i) => (
-              <div key={card.id} className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-slate-200 text-[11px] font-semibold text-slate-500">{i + 1}</span><p className="truncate text-sm font-medium text-slate-800">{card.q}</p></div>
-                  <p className="truncate pl-7 text-xs text-slate-500">{card.a}</p>
-                </div>
-                {isEditingFlashcards && (
-                  <div className="flex shrink-0 gap-1.5">
-                    <button onClick={() => onEditCard(card)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:text-slate-900"><Pencil className="h-3.5 w-3.5" /></button>
-                    <button onClick={() => onDeleteCard(deck.id, card.id)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </Section>
+      <ProjectTabs active={activeTab} onSelect={setActiveTab} counts={counts} />
 
-      {/* Gaps */}
-      <Section icon={AlignLeft} title="Gaps" subtitle={`${deck.gaps.length} ${deck.gaps.length === 1 ? "gap" : "gaps"}`} accent={deck.accent}
-        action={<>
-          <button onClick={onAddGap} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"><Plus className="h-4 w-4" /> Add</button>
-          {deck.gaps.length > 0 && <EditToggle editing={isEditingGaps} onToggle={() => setIsEditingGaps((v) => !v)} />}
-          <button onClick={() => onStudy("gap")} disabled={!deck.gaps.length} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-md transition active:scale-95 ${deck.gaps.length ? `bg-gradient-to-r ${deck.accent} hover:opacity-90` : "cursor-not-allowed bg-slate-300"}`}><AlignLeft className="h-4 w-4" /> Study</button>
-        </>}>
-        <TwoAcc label="Gap" allCorrect={p.gapCorrect} allTotal={p.gapTotal} last={lastProg[deck.id]?.gap} />
-        {deck.gaps.length === 0 ? <p className="text-sm text-slate-400">No gaps yet. Use “Add”, then double-tap a word to hide it.</p> : isEditingGaps && (
-          <div className="space-y-2">
-            {deck.gaps.map((gap) => { const parsed = parseGaps(gap.text); return (
-              <div key={gap.id} className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
-                <p className="min-w-0 flex-1 text-sm text-slate-700">{parsed.segments.map((s, i) => s.type === "text" ? <span key={i}>{s.value}</span> : <span key={i} className="mx-0.5 rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-700">{s.answer}</span>)}</p>
-                {isEditingGaps && (
-                  <div className="flex shrink-0 gap-1.5">
-                    <button onClick={() => onEditGap(gap)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-500 transition hover:text-slate-900"><Pencil className="h-3.5 w-3.5" /></button>
-                    <button onClick={() => onDeleteGap(deck.id, gap.id)} className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>
-                  </div>
-                )}
-              </div>
-            ); })}
-          </div>
-        )}
-      </Section>
-
-      {/* Quiz — MCQs only (added/imported here); independent of Flashcards */}
-      <Section icon={ListChecks} title="Quiz" subtitle={`${quizCount(deck)} questions${mcqs.length ? ` · ${mcqs.length} imported` : ""}`} accent={deck.accent}
-        action={<>
-          <label title="Import MCQs from a .csv file" className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50">
-            <Upload className="h-4 w-4" /> Import CSV
-            <input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => { handleCsv(e.target.files?.[0]); e.target.value = ""; }} />
-          </label>
-          {mcqs.length > 0 && <EditToggle editing={isEditingQuiz} onToggle={() => setIsEditingQuiz((v) => !v)} />}
-          <button onClick={() => onStudy("quiz")} disabled={!quizReady} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-md transition active:scale-95 ${quizReady ? `bg-gradient-to-r ${deck.accent} hover:opacity-90` : "cursor-not-allowed bg-slate-300"}`}><ListChecks className="h-4 w-4" /> {quizReady ? "Start" : "Need cards/CSV"}</button>
-        </>}>
-        <TwoAcc label="Quiz" allCorrect={p.quizCorrect} allTotal={p.quizTotal} last={lastProg[deck.id]?.quiz} />
-        {importMsg && <p className={`mb-3 text-xs font-medium ${importMsg.ok ? "text-emerald-600" : "text-rose-500"}`}>{importMsg.text}</p>}
-        {mcqs.length > 0 && isEditingQuiz && (
-          <div className="space-y-2">
-            {mcqs.map((m, i) => (
-              <div key={m.id} className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-slate-200 text-[11px] font-semibold text-slate-500">{i + 1}</span><p className="truncate text-sm font-medium text-slate-800">{m.q}</p></div>
-                  <p className="truncate pl-7 text-xs text-slate-500">{m.options.length} options · answer: <span className="font-medium text-emerald-600">{m.answer}</span></p>
-                </div>
-                {isEditingQuiz && <button onClick={() => onDeleteMcq(deck.id, m.id)} className="shrink-0 rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"><Trash2 className="h-3.5 w-3.5" /></button>}
-              </div>
-            ))}
-          </div>
-        )}
-      </Section>
-
-      {/* Images */}
-      <Section icon={ImageIcon} title="Images" subtitle={`${occlusions.length} image ${occlusions.length === 1 ? "card" : "cards"}`} accent={deck.accent}
-        action={<>
-          <button onClick={onNewImage} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50"><Plus className="h-4 w-4" /> New</button>
-          {occlusions.length > 0 && <EditToggle editing={isEditingImages} onToggle={() => setIsEditingImages((v) => !v)} />}
-          <button onClick={() => onStudyImages(occlusions)} disabled={!occlusions.length} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-md transition active:scale-95 ${occlusions.length ? `bg-gradient-to-r ${deck.accent} hover:opacity-90` : "cursor-not-allowed bg-slate-300"}`}><Eye className="h-4 w-4" /> Study</button>
-        </>}>
-        {isEditingImages && (occlusions.length === 0
-          ? <p className="text-sm text-slate-400">No image cards yet. Use “New” to upload an image and cover words.</p>
-          : <div className="space-y-3">
-              {occlusions.map((occ) => <OccRow key={occ.id} occ={occ} editing={isEditingImages} onEdit={onEditImage} onDelete={onDeleteImage} onStudy={onStudyImages} />)}
-            </div>
-        )}
-      </Section>
+      {/* All panels stay MOUNTED — hidden (not unmounted) — so form drafts and
+          edit-mode survive tab switches. */}
+      <div className={activeTab === "flip" ? "" : "hidden"}>
+        <FlashcardsPanel deck={deck} prog={p} last={lastProg[deck.id]?.flip} onStudy={onStudy} onSaveCard={onSaveCard} onBulkCards={onBulkCards} onEditCard={onEditCard} onDeleteCard={onDeleteCard} />
+      </div>
+      <div className={activeTab === "gap" ? "" : "hidden"}>
+        <GapsPanel deck={deck} prog={p} last={lastProg[deck.id]?.gap} onStudy={onStudy} onSaveGap={onSaveGap} onBulkGaps={onBulkGaps} onEditGap={onEditGap} onDeleteGap={onDeleteGap} />
+      </div>
+      <div className={activeTab === "quiz" ? "" : "hidden"}>
+        <QuizPanel deck={deck} prog={p} last={lastProg[deck.id]?.quiz} onStudy={onStudy} onImportMcqs={onImportMcqs} onDeleteMcq={onDeleteMcq} />
+      </div>
+      <div className={activeTab === "images" ? "" : "hidden"}>
+        <ImagesPanel deck={deck} occlusions={occlusions} onStudyImages={onStudyImages} onNewImage={onNewImage} onEditImage={onEditImage} onDeleteImage={onDeleteImage} />
+      </div>
     </div>
   );
 }

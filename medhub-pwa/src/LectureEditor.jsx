@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./lib/supabaseClient";
 import { parseMcqJson } from "./lib/mcqImport";
+import { htmlToMarkdown } from "./lib/notionMarkdown";
 import LectureContent from "./LectureContent";
 
 const SUCCESS = "#0E9F6E";
@@ -74,6 +75,40 @@ export default function LectureEditor({ lectureId, onBack, onSavedMeta, notify }
       const caret = start + snippet.length;
       ta.setSelectionRange(caret, caret);
     });
+  }
+
+  // Notion (and other rich editors) put HTML on the clipboard. Convert it to
+  // clean Markdown and insert at the cursor. Plain-text pastes carry no
+  // text/html, so we do nothing and let the browser's default paste run.
+  function handlePaste(e) {
+    const html = e.clipboardData?.getData("text/html");
+    if (!html || !html.trim()) return;          // plain text → native paste
+    const md = htmlToMarkdown(html);
+    if (!md) return;                            // nothing usable → native paste
+    e.preventDefault();
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.focus();
+    // Preferred path: execCommand keeps the NATIVE undo stack, so Ctrl+Z undoes
+    // the whole paste as ONE step (critical in a long-form editor). It also
+    // fires a real `input` event → React's onChange updates `notes`, and it
+    // leaves the caret right after the inserted text.
+    let ok = false;
+    try { ok = document.execCommand("insertText", false, md); } catch { ok = false; }
+    if (ok) { setNotes(ta.value); return; }     // sync state to match the DOM
+    // Fallback (execCommand unavailable): setRangeText edits the field in place
+    // and places the caret after the insertion; more undo-friendly than
+    // rebuilding the whole value by hand.
+    const start = ta.selectionStart ?? notes.length;
+    const end = ta.selectionEnd ?? notes.length;
+    if (typeof ta.setRangeText === "function") {
+      ta.setRangeText(md, start, end, "end");
+      setNotes(ta.value);
+    } else {
+      const next = notes.slice(0, start) + md + notes.slice(end);
+      setNotes(next);
+      requestAnimationFrame(() => { ta.focus(); const caret = start + md.length; ta.setSelectionRange(caret, caret); });
+    }
   }
 
   useEffect(() => {
@@ -235,6 +270,7 @@ export default function LectureEditor({ lectureId, onBack, onSavedMeta, notify }
             ref={taRef}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
+            onPaste={handlePaste}
             spellCheck={false}
             placeholder={"# Heading\n\nWrite the lecture article in Markdown…"}
             className="h-[28rem] w-full resize-y rounded-xl border border-gray-200 bg-white dark:border-white/20 dark:bg-white/10 p-4 font-mono text-sm leading-relaxed text-gray-900 dark:text-slate-100 shadow-sm focus:border-med-primary focus:outline-none focus:ring-1 focus:ring-med-primary"
