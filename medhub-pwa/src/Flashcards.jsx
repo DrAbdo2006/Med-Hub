@@ -786,8 +786,10 @@ export default function App() {
   const openProject = openProjectId ? deckOf(openProjectId) : null;
   return wrap(
     <Shell>
-      {/* Global Settings gear only on the Library view, not inside a project */}
-      <Header onSettings={openProject ? undefined : () => setShowSettings(true)} />
+      {/* Library only: logo header + Settings gear. Inside a project the
+          immersive ProjectView owns its own top bar (Back · title · +), so
+          the extra logo row would just eat stage height. */}
+      {!openProject && <Header onSettings={() => setShowSettings(true)} />}
 
       {openProject ? (
         <ProjectView
@@ -2209,17 +2211,6 @@ const PROJECT_TABS = [
 
 // Sticky, horizontally-scrollable tab switcher (same nav pattern as the portal:
 // LTR scroll, hidden scrollbar, ≥44px targets, no-shrink items).
-function StudyLauncher({ label, icon: Icon, accent, count, ready = true, onStudy, disabledHint }) {
-  const can = ready && count > 0;
-  return (
-    <button onClick={onStudy} disabled={!can}
-      className={`mt-4 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white shadow-md transition active:scale-95 ${can ? `bg-gradient-to-r ${accent} hover:opacity-90` : "cursor-not-allowed bg-slate-300 dark:bg-white/10 dark:text-slate-400"}`}>
-      <Icon className="h-4 w-4" /> {can ? `Study ${label}` : (disabledHint || "Nothing to study yet")}
-    </button>
-  );
-}
-
-// Friendly, on-brand empty state shown when a tab has no items yet.
 function EmptyState({ icon: Icon, title, hint }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 py-12 text-center dark:border-white/10 dark:bg-white/5">
@@ -2238,9 +2229,6 @@ function FlashcardsPanel({ deck, prog, last, adding, onStudy, onSaveCard, onBulk
   const reset = () => setFormKey((k) => k + 1);
   return (
     <div className="space-y-5">
-      <div className={panelCard}>
-        <StudyLauncher label="flashcards" icon={BookOpen} accent={deck.accent} count={deck.cards.length} onStudy={() => onStudy("flip")} disabledHint="Add a card to study" />
-      </div>
       {/* Creation form: hidden (not unmounted) when not adding, so a half-typed
           card survives collapsing/reopening the creation hub. */}
       <div className={adding ? "" : "hidden"}>
@@ -2282,9 +2270,6 @@ function GapsPanel({ deck, prog, last, adding, onStudy, onSaveGap, onBulkGaps, o
   const reset = () => setFormKey((k) => k + 1);
   return (
     <div className="space-y-5">
-      <div className={panelCard}>
-        <StudyLauncher label="the gaps" icon={AlignLeft} accent={deck.accent} count={deck.gaps.length} onStudy={() => onStudy("gap")} disabledHint="Add a gap to study" />
-      </div>
       <div className={adding ? "" : "hidden"}>
         <GapForm key={formKey} initial={blankGap()}
           onSave={(gap) => { onSaveGap(deck.id, gap); reset(); }}
@@ -2364,9 +2349,6 @@ function QuizPanel({ deck, prog, last, adding, onStudy, onImportMcqs, onDeleteMc
   const mcqs = deck.mcqs || [];
   return (
     <div className="space-y-5">
-      <div className={panelCard}>
-        <StudyLauncher label="quiz" icon={ListChecks} accent={deck.accent} count={mcqs.length} ready={canQuiz(deck)} onStudy={() => onStudy("quiz")} disabledHint="Add a question to start" />
-      </div>
       <div className={adding ? "" : "hidden"}>
         <McqForm accent={deck.accent} onSave={(m) => onImportMcqs(deck.id, [m])} onImportCsv={(list) => onImportMcqs(deck.id, list)} />
       </div>
@@ -2398,7 +2380,6 @@ function ImagesPanel({ deck, occlusions, adding, onStudyImages, onNewImage, onEd
     <div className="space-y-5">
       <div className={panelCard}>
         <p className="text-sm text-slate-500 dark:text-slate-300">{occlusions.length} image card{occlusions.length === 1 ? "" : "s"} · cover words on a picture, then reveal them one by one.</p>
-        <StudyLauncher label="images" icon={Eye} accent={deck.accent} count={occlusions.length} onStudy={() => onStudyImages(occlusions)} disabledHint="Create an image card to study" />
       </div>
       <div className={adding ? "" : "hidden"}>
         <button onClick={onNewImage} className="flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-indigo-200 bg-indigo-50/40 px-4 py-4 text-sm font-semibold text-med-primary transition hover:border-indigo-300 dark:border-white/10 dark:bg-white/5 dark:text-[#63C4F1]"><Plus className="h-4 w-4" /> New image card</button>
@@ -2427,72 +2408,51 @@ function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRena
   const showProjectEmpty = totalItems === 0 && !isAdding;
 
   return (
-    <div>
-      <div className="mb-4 flex items-center justify-between gap-2">
-        <button onClick={onBack} className="inline-flex items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to files</button>
-        {/* Populated only: a sleek "+" that toggles the creation hub
-            (draft-safe: forms are hidden, not unmounted). The old "Study Room"
-            header button is gone — the launcher card below owns studying. */}
-        <div className="flex items-center gap-2">
+    /* Immersive full-height stage. HEIGHT CHOICE (deliberate): this view is
+       NESTED under the portal's sticky top bar + Shell's padded container, so
+       a raw min-h-screen/100vh here would overflow the chrome and create
+       double scrollbars. Instead: min-height = small-viewport height minus
+       the surrounding chrome (~8rem), in dvh so mobile browser chrome never
+       clips the centered stage. min-h (not fixed h) so long content still
+       flows naturally instead of clipping. */
+    <div className="flex min-h-[calc(100dvh-8rem)] flex-col">
+      {/* 3-zone app header: start = Back · center = title (flex-1, min-w-0,
+          truncates — can NEVER overlap the buttons, unlike absolute
+          centering) · end = "+". justify-* are flow-relative, so the zones
+          stay start/end-correct under RTL; the title itself is dir-aware. */}
+      <div className="flex items-center gap-2">
+        <div className="flex flex-1 justify-start">
+          <button onClick={onBack} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back</button>
+        </div>
+        <div className="flex min-w-0 flex-[2] items-center justify-center gap-1.5">
+          <EditableTitle value={deck.title} onChange={(t) => onRename(deck.id, t)} editing={renaming} onEditingChange={setRenaming} clickToEdit={false} className="truncate text-center text-lg font-bold tracking-tight text-slate-900" />
+          <button onClick={() => setRenaming(true)} title="Rename project" className="shrink-0 rounded-lg border border-slate-200 p-1.5 text-slate-400 transition hover:bg-slate-50 hover:text-slate-700"><Pencil className="h-3.5 w-3.5" /></button>
+        </div>
+        <div className="flex flex-1 justify-end">
           {(totalItems > 0 || isAdding) && (
             <button onClick={() => setIsAdding((v) => !v)} aria-pressed={isAdding} title={isAdding ? "Close creation hub" : "Add new question"} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm transition active:scale-95 ${isAdding ? "border-med-primary bg-med-primary/10 text-med-primary" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-white/15 dark:bg-white/5 dark:text-slate-300"}`}><Plus className={`h-5 w-5 transition-transform ${isAdding ? "rotate-45" : ""}`} /></button>
           )}
         </div>
       </div>
 
-      <div className="mb-5 min-w-0">
-        <div className="flex items-center gap-2">
-          <EditableTitle value={deck.title} onChange={(t) => onRename(deck.id, t)} editing={renaming} onEditingChange={setRenaming} clickToEdit={false} className="text-2xl font-bold tracking-tight text-slate-900" />
-          <button onClick={() => setRenaming(true)} title="Rename project" className="rounded-lg border border-slate-200 p-1.5 text-slate-400 transition hover:bg-slate-50 hover:text-slate-700"><Pencil className="h-3.5 w-3.5" /></button>
-        </div>
-        <div className="mt-1"><InlineDesc value={deck.description} onSave={(t) => onSetDesc(deck.id, t)} placeholder="Add a project description…" /></div>
-      </div>
-
       {showProjectEmpty ? (
-        /* Brand-new project: hide mode dropdown, Study, and forms; ONE prominent
-           centered action to create the first question. */
-        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 py-16 text-center dark:border-white/10 dark:bg-white/5">
-          <div className="mb-4 rounded-2xl bg-med-primary-soft p-4 dark:bg-[#1B98E0]/20"><Layers className="h-7 w-7 text-med-primary dark:text-[#63C4F1]" /></div>
-          <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">This project is empty</h3>
-          <p className="mt-1 max-w-sm text-sm text-slate-500 dark:text-slate-400">Add flashcards, gaps, quiz questions, or an image card to start studying.</p>
-          <button onClick={() => setIsAdding(true)} className="mt-6 inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-med-primary px-6 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95"><Plus className="h-4 w-4" /> Add Questions</button>
+        /* Brand-new project: centered in the stage; ONE prominent action. */
+        <div className="flex flex-1 flex-col items-center justify-center">
+          <div className="flex w-full max-w-xl flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 py-16 text-center dark:border-white/10 dark:bg-white/5">
+            <div className="mb-4 rounded-2xl bg-med-primary-soft p-4 dark:bg-[#1B98E0]/20"><Layers className="h-7 w-7 text-med-primary dark:text-[#63C4F1]" /></div>
+            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">This project is empty</h3>
+            <p className="mt-1 max-w-sm text-sm text-slate-500 dark:text-slate-400">Add flashcards, gaps, quiz questions, or an image card to start studying.</p>
+            <button onClick={() => setIsAdding(true)} className="mt-6 inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-med-primary px-6 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95"><Plus className="h-4 w-4" /> Add Questions</button>
+          </div>
         </div>
       ) : (
         <>
-          {/* Mixed-study launcher — deliberately NOT auto-started on mount:
-              one tap keeps the user in control, never dumps them into an
-              empty session, and doubles as the re-start entry point after a
-              finished/exited review. */}
-          {sm2Total > 0 ? (
-            sm2Due > 0 ? (
-              <button
-                onClick={() => onStudy("mixed")}
-                className="mb-5 flex w-full items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-med-primary to-[#1577B0] px-6 py-5 text-left shadow-lg transition hover:opacity-95 active:scale-[0.99]"
-              >
-                <span>
-                  <span className="block text-lg font-bold text-white">{sm2Due} item{sm2Due === 1 ? "" : "s"} due — Start review</span>
-                  <span className="mt-0.5 block text-sm text-white/80">Flashcards, gaps &amp; quiz questions, interleaved by SM-2 priority.</span>
-                </span>
-                <Brain className="h-8 w-8 shrink-0 text-white/90" aria-hidden="true" />
-              </button>
-            ) : (
-              <div className="mb-5 flex flex-col items-start gap-3 rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="font-semibold text-slate-800">All caught up ✅</p>
-                  <p className="mt-0.5 text-sm text-slate-500">Nothing is due right now — SM-2 will bring items back when it's time.</p>
-                </div>
-                <div className="flex shrink-0 gap-2">
-                  <button onClick={() => onStudy("mixed", { all: true })} className="rounded-xl bg-med-primary px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 active:scale-95">Study anyway</button>
-                  <button onClick={() => setIsAdding(true)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50">Add items</button>
-                </div>
-              </div>
-            )
-          ) : (
-            <div className="mb-5 rounded-2xl border border-dashed border-slate-300 px-6 py-4 text-sm text-slate-500">
-              This project has image cards only — pick <span className="font-semibold">Images</span> in the Mode menu below to practice them (image boards aren't SM-2-scheduled).
-            </div>
-          )}
-
+          {/* Creation hub — distinct panel directly below the header, toggled
+              by "+". hidden (never unmounted): a half-typed draft, the mode
+              dropdown choice, and per-panel edit-modes all survive closing.
+              The item lists live at the bottom of each panel, so they stay
+              behind this toggle instead of cluttering the study stage. */}
+          <div className={isAdding ? "mt-5" : "hidden"}>
           {/* Mode dropdown — native <select> for keyboard + screen-reader
               behavior. Panels stay MOUNTED and are only CSS-hidden, so drafts
               and edit-modes survive switches. */}
@@ -2525,6 +2485,43 @@ function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRena
           </div>
           <div className={activeTab === "images" ? "" : "hidden"}>
             <ImagesPanel deck={deck} occlusions={occlusions} adding={isAdding} onStudyImages={onStudyImages} onNewImage={onNewImage} onEditImage={onEditImage} onDeleteImage={onDeleteImage} />
+          </div>
+          </div>{/* /creation hub */}
+
+          {/* Central stage — THE study entry point, centered in the leftover
+              height (flex-1). Deliberately NOT auto-started: one tap keeps
+              the user in control, never dumps them into an empty session,
+              and doubles as the re-start entry after a finished review. */}
+          <div className="flex flex-1 flex-col items-center justify-center py-10">
+            {sm2Total > 0 ? (
+              sm2Due > 0 ? (
+                <button
+                  onClick={() => onStudy("mixed")}
+                  className="flex w-full max-w-xl items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-med-primary to-[#1577B0] px-6 py-6 text-left shadow-lg transition hover:opacity-95 active:scale-[0.99]"
+                >
+                  <span>
+                    <span className="block text-lg font-bold text-white">{sm2Due} item{sm2Due === 1 ? "" : "s"} due — Start review</span>
+                    <span className="mt-0.5 block text-sm text-white/80">Flashcards, gaps &amp; quiz questions, interleaved by SM-2 priority.</span>
+                  </span>
+                  <Brain className="h-8 w-8 shrink-0 text-white/90" aria-hidden="true" />
+                </button>
+              ) : (
+                <div className="flex w-full max-w-xl flex-col items-center gap-4 rounded-2xl border border-slate-200 bg-white px-6 py-8 text-center shadow-sm">
+                  <div>
+                    <p className="text-lg font-semibold text-slate-800">All caught up ✅</p>
+                    <p className="mt-1 text-sm text-slate-500">Nothing is due right now — SM-2 will bring items back when it's time.</p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button onClick={() => onStudy("mixed", { all: true })} className="rounded-xl bg-med-primary px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 active:scale-95">Study anyway</button>
+                    <button onClick={() => setIsAdding(true)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50">Add items</button>
+                  </div>
+                </div>
+              )
+            ) : (
+              <div className="w-full max-w-xl rounded-2xl border border-dashed border-slate-300 px-6 py-5 text-center text-sm text-slate-500">
+                This project has image cards only — open <span className="font-semibold">+</span> and pick <span className="font-semibold">Images</span> to practice a board (image boards aren't SM-2-scheduled).
+              </div>
+            )}
           </div>
         </>
       )}
