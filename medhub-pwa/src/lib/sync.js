@@ -85,14 +85,14 @@ async function validSession() {
     if (expiresMs - Date.now() <= skewMs) {
       const { data, error } = await supabase.auth.refreshSession();
       if (error || !data.session) {
-        console.error("[sync] session refresh failed:", error);
+        console.error(`[SYNC ERROR] session refresh failed — code: ${error?.code ?? "(none)"} status: ${error?.status ?? "(none)"} message: ${error?.message ?? error}`, { error });
         return null;
       }
       session = data.session;
     }
     return session;
   } catch (e) {
-    console.error("[sync] getSession threw:", e);
+    console.error(`[SYNC ERROR] getSession threw — message: ${e?.message ?? e}`, { error: e });
     return null;
   }
 }
@@ -110,6 +110,10 @@ function snapshot(entity, payload) {
 export async function enqueueOutbox(entity, entityId, payload, deleted = false) {
   // Fire-and-forget from the writers: a (rare) outbox failure must never
   // break the local-first write that already succeeded.
+  // NOTE (deliberate): this coalescing put() resets `retries` and clears
+  // `parked` for the row — a NEW payload deserves a fresh chance (the edit
+  // may have fixed malformed data). Permanent failures (RLS/auth/validation)
+  // no longer depend on the counter anyway: they park on FIRST failure.
   try {
     const updated_at = payload?.updated_at ?? Date.now();
     await db.outbox.put({
@@ -126,6 +130,45 @@ export async function enqueueOutbox(entity, entityId, payload, deleted = false) 
   } catch {
     /* local data is safe; sync just won't have this op until the next write */
   }
+}
+
+// ---- failure classification + diagnostics ----------------------------------
+// TRANSIENT (keep retrying, bounded): network drops, timeouts, 5xx, 429.
+// PERMANENT (park immediately — retrying can't help): RLS violations (42501),
+// auth/JWT rejections (401/403), PostgREST contract errors (PGRST*), and
+// data-type/constraint errors (22xxx / 23xxx, e.g. 22P02 invalid input).
+// Unknown errors default to transient so real outages aren't parked, but stay
+// bounded by MAX_RETRIES.
+function classifyFailure(e) {
+  const code = e?.code != null ? String(e.code) : "";
+  const status = e?.status ?? e?.statusCode ?? null;
+  const msg = String(e?.message || e || "");
+  if (e instanceof TypeError || /failed to fetch|networkerror|load failed|timeout|abort/i.test(msg)) return "transient";
+  if (status != null) {
+    if (status === 408 || status === 429 || status >= 500) return "transient";
+    if (status >= 400) return "permanent";           // 401/403 auth, 404, 409, 422…
+  }
+  if (code === "42501") return "permanent";          // RLS policy violation
+  if (/^PGRST/i.test(code)) return "permanent";      // PostgREST / REST contract
+  if (/^(22|23)/.test(code)) return "permanent";     // data type (22P02) / constraint
+  return "transient";
+}
+
+// One loud, grep-able error record per failure. Search the console for
+// "[SYNC ERROR]". Prints every Supabase error field explicitly (a bare object
+// can collapse to [object Object] in some sinks) AND attaches the raw error +
+// failing item as a structured second argument for expansion in DevTools.
+function logSyncError(it, e, bucket, action) {
+  console.error(
+    `[SYNC ERROR] ${bucket.toUpperCase()} — ${action}\n` +
+      `  code:    ${e?.code ?? "(none)"}   ← 42501=RLS · 401/403=auth/JWT · PGRST*=REST · 22P02=data type\n` +
+      `  status:  ${e?.status ?? e?.statusCode ?? "(none)"}\n` +
+      `  message: ${e?.message ?? String(e)}\n` +
+      `  details: ${e?.details ?? "(none)"}\n` +
+      `  hint:    ${e?.hint ?? "(none)"}\n` +
+      `  item:    _type=${it.entity} id=${it.entityId} deleted=${!!it.deleted} retries=${it.retries || 0} updated_at=${new Date(it.updated_at).toISOString()}`,
+    { item: { _type: it.entity, id: it.entityId, payload: it.payload }, error: e }
+  );
 }
 
 // ---- flush: push the outbox, one idempotent RPC per row --------------------
@@ -172,7 +215,7 @@ export async function flushOutbox() {
       try {
         // Idempotent by client UUID (upsert key) + server LWW guard, so a
         // retry that already landed is a safe no-op — never a duplicate row.
-        const { data, error } = await supabase.rpc(
+        const { error, status: httpStatus } = await supabase.rpc(
           it.entity === "deck" ? "fc_upsert_deck" : "fc_upsert_card",
           {
             _id: String(it.entityId),
@@ -182,8 +225,9 @@ export async function flushOutbox() {
           }
         );
         if (error) {
-          // Log the FULL response so failures are never invisible again.
-          console.error(`[sync] RPC ${it.entity} ${it.id} failed:`, { error, data });
+          // Carry the HTTP status into the error so the classifier/logger
+          // can distinguish auth (401/403) from server (5xx) failures.
+          if (error.status == null) error.status = httpStatus;
           throw error;
         }
         // Remove ONLY if the row wasn't re-queued (newer edit) mid-flight.
@@ -192,12 +236,28 @@ export async function flushOutbox() {
           await db.outbox.delete(it.id);
         }
       } catch (e) {
+        const bucket = classifyFailure(e);
         const retries = (it.retries || 0) + 1;
-        if (retries >= MAX_RETRIES) {
-          // Poison item: park it and keep flushing the rest of the queue.
+        // PERMANENT failures park IMMEDIATELY — retrying an RLS/validation
+        // rejection can never succeed, and looping on it is what kept the
+        // pill stuck on "Sync pending — will retry".
+        const park = bucket === "permanent" || retries >= MAX_RETRIES;
+        logSyncError(
+          it,
+          e,
+          bucket,
+          park
+            ? `PARKED ${bucket === "permanent" ? "(permanent — retrying can't help)" : `(after ${retries}/${MAX_RETRIES} attempts)`}`
+            : `retry ${retries}/${MAX_RETRIES} scheduled`
+        );
+        if (park) {
           newlyParked++;
-          console.error(`[sync] parking poison item ${it.id} after ${retries} tries:`, e);
-          await db.outbox.update(it.id, { retries, parked: true, lastError: String(e?.message || e) }).catch(() => {});
+          await db.outbox.update(it.id, {
+            retries,
+            parked: true,
+            failBucket: bucket,
+            lastError: `${e?.code ?? ""} ${e?.message ?? e}`.trim(),
+          }).catch(() => {});
         } else {
           transientFailures++;
           await db.outbox.update(it.id, { retries }).catch(() => {});

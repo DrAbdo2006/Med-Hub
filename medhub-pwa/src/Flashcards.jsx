@@ -633,9 +633,12 @@ export default function App() {
   const recordQuiz = (id, ok) => { bump(id, (c) => ({ quizTotal: c.quizTotal + 1, quizCorrect: c.quizCorrect + (ok ? 1 : 0) })); bumpActivity(); };
 
   // sessions — mastery study-loop: a DYNAMIC QUEUE of card ids (SM-2 ordered).
-  function startSession(deckId, mode) {
+  function startSession(deckId, mode, opts) {
     const deck = deckOf(deckId);
     const base = { deckId, mode, done: false, reinserts: {} };
+    // opts.all → "Study anyway": mixed queue includes EVERYTHING, not just due
+    // items (used by the caught-up state; SM-2 scheduling itself unchanged).
+    const includeAll = !!opts?.all;
     if (mode === "flip") {
       const cards = sortByDue(deck.cards);
       setSession({ ...base, flipped: false, results: { again: 0, hard: 0, good: 0, easy: 0 }, cards, queue: cards.map((c) => c.id), total: cards.length, graduated: 0 });
@@ -650,11 +653,11 @@ export default function App() {
       // gaps, MCQs) into ONE queue. Each entry carries its `type`; MixedView
       // dispatches the right per-item UI. Occlusion image boards are NOT
       // SM-2-scheduled in this app, so they aren't part of the due queue.
-      const dueCards = sortByDue(deck.cards).filter((c) => isDue(srs, c.id)).map((c) => ({ type: "flip", id: c.id }));
-      const dueGaps = sortByDue(deck.gaps).filter((g) => isDue(srs, g.id)).map((g) => ({ type: "gap", id: g.id }));
+      const dueCards = sortByDue(deck.cards).filter((c) => includeAll || isDue(srs, c.id)).map((c) => ({ type: "flip", id: c.id }));
+      const dueGaps = sortByDue(deck.gaps).filter((g) => includeAll || isDue(srs, g.id)).map((g) => ({ type: "gap", id: g.id }));
       const quizItems = [...buildQuiz(deck)].sort((a, b) => dueOf(a.id) - dueOf(b.id));
       const quizById = {};
-      const dueQuiz = quizItems.filter((q) => isDue(srs, q.id)).map((q) => { quizById[q.id] = q; return { type: "quiz", id: q.id }; });
+      const dueQuiz = quizItems.filter((q) => { quizById[q.id] = q; return includeAll || isDue(srs, q.id); }).map((q) => ({ type: "quiz", id: q.id }));
       const queue = interleave([dueCards, dueGaps, dueQuiz]);
       setSession({ ...base, queue, index: 0, total: queue.length, quizById, results: { again: 0, hard: 0, good: 0, easy: 0 }, correct: 0, flipped: false, revealed: false, selected: null, answered: false, caughtUp: queue.length === 0 });
     }
@@ -791,7 +794,8 @@ export default function App() {
           deck={openProject} occlusions={occlusions.filter((o) => o.projectId === openProject.id)}
           progress={progress} lastProg={lastProg}
           onBack={() => setOpenProjectId(null)} onRename={renameDeck} onSetDesc={setDeckDesc}
-          onStudy={(mode) => startSession(openProject.id, mode)}
+          srs={srs}
+          onStudy={(mode, opts) => startSession(openProject.id, mode, opts)}
           onSaveCard={upsertCard} onBulkCards={addCards} onEditCard={(card) => setEditor({ deckId: openProject.id, card })} onDeleteCard={deleteCard}
           onSaveGap={upsertGap} onBulkGaps={addGaps} onEditGap={(gap) => setGapEditor({ deckId: openProject.id, gap })} onDeleteGap={deleteGap}
           onImportMcqs={importMcqs} onDeleteMcq={deleteMcq}
@@ -2406,13 +2410,17 @@ function ImagesPanel({ deck, occlusions, adding, onStudyImages, onNewImage, onEd
   );
 }
 
-function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, onSetDesc, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard, onSaveGap, onBulkGaps, onEditGap, onDeleteGap, onImportMcqs, onDeleteMcq, onNewImage, onEditImage, onDeleteImage, onStudyImages }) {
+function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRename, onSetDesc, onStudy, onSaveCard, onBulkCards, onEditCard, onDeleteCard, onSaveGap, onBulkGaps, onEditGap, onDeleteGap, onImportMcqs, onDeleteMcq, onNewImage, onEditImage, onDeleteImage, onStudyImages }) {
   const [renaming, setRenaming] = useState(false);
   const [activeTab, setActiveTab] = useState("flip");
   const [isAdding, setIsAdding] = useState(false);   // creation hub open?
   const p = progress[deck.id] || blankProg();
   const counts = { flip: deck.cards?.length || 0, gap: deck.gaps?.length || 0, quiz: (deck.mcqs || []).length, images: occlusions?.length || 0 };
   const totalItems = counts.flip + counts.gap + counts.quiz + counts.images;
+  // Due count for the mixed launcher — same isDue() the mixed queue uses, so
+  // the number on the launcher always matches the session it starts.
+  const sm2Total = counts.flip + counts.gap + counts.quiz;
+  const sm2Due = [...(deck.cards || []), ...(deck.gaps || []), ...(deck.mcqs || [])].filter((x) => isDue(srs || {}, x.id)).length;
   // Project-level empty state takes over ONLY when the whole project is empty
   // AND the user hasn't opened the creation hub. Once content exists (or they're
   // adding), the tabbed dashboard + per-tab empty states apply.
@@ -2422,12 +2430,10 @@ function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, o
     <div>
       <div className="mb-4 flex items-center justify-between gap-2">
         <button onClick={onBack} className="inline-flex items-center gap-1.5 rounded-xl border border-med-lines bg-white px-4 py-2 text-sm font-medium text-med-text shadow-sm transition-all hover:bg-[#F7F9FA] hover:shadow-md active:scale-95"><ArrowLeft className="h-4 w-4" /> Back to files</button>
-        {/* Populated only: mixed Study Room + a sleek "+" that toggles the
-            creation hub (draft-safe: forms are hidden, not unmounted). */}
+        {/* Populated only: a sleek "+" that toggles the creation hub
+            (draft-safe: forms are hidden, not unmounted). The old "Study Room"
+            header button is gone — the launcher card below owns studying. */}
         <div className="flex items-center gap-2">
-          {totalItems > 0 && (
-            <button onClick={() => onStudy("mixed")} className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-med-primary px-4 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:opacity-90 active:scale-95"><Layers className="h-4 w-4" /> Study Room</button>
-          )}
           {(totalItems > 0 || isAdding) && (
             <button onClick={() => setIsAdding((v) => !v)} aria-pressed={isAdding} title={isAdding ? "Close creation hub" : "Add new question"} className={`inline-flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm transition active:scale-95 ${isAdding ? "border-med-primary bg-med-primary/10 text-med-primary" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-white/15 dark:bg-white/5 dark:text-slate-300"}`}><Plus className={`h-5 w-5 transition-transform ${isAdding ? "rotate-45" : ""}`} /></button>
           )}
@@ -2453,6 +2459,40 @@ function ProjectView({ deck, occlusions, progress, lastProg, onBack, onRename, o
         </div>
       ) : (
         <>
+          {/* Mixed-study launcher — deliberately NOT auto-started on mount:
+              one tap keeps the user in control, never dumps them into an
+              empty session, and doubles as the re-start entry point after a
+              finished/exited review. */}
+          {sm2Total > 0 ? (
+            sm2Due > 0 ? (
+              <button
+                onClick={() => onStudy("mixed")}
+                className="mb-5 flex w-full items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-med-primary to-[#1577B0] px-6 py-5 text-left shadow-lg transition hover:opacity-95 active:scale-[0.99]"
+              >
+                <span>
+                  <span className="block text-lg font-bold text-white">{sm2Due} item{sm2Due === 1 ? "" : "s"} due — Start review</span>
+                  <span className="mt-0.5 block text-sm text-white/80">Flashcards, gaps &amp; quiz questions, interleaved by SM-2 priority.</span>
+                </span>
+                <Brain className="h-8 w-8 shrink-0 text-white/90" aria-hidden="true" />
+              </button>
+            ) : (
+              <div className="mb-5 flex flex-col items-start gap-3 rounded-2xl border border-slate-200 bg-white px-6 py-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="font-semibold text-slate-800">All caught up ✅</p>
+                  <p className="mt-0.5 text-sm text-slate-500">Nothing is due right now — SM-2 will bring items back when it's time.</p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button onClick={() => onStudy("mixed", { all: true })} className="rounded-xl bg-med-primary px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 active:scale-95">Study anyway</button>
+                  <button onClick={() => setIsAdding(true)} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50">Add items</button>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="mb-5 rounded-2xl border border-dashed border-slate-300 px-6 py-4 text-sm text-slate-500">
+              This project has image cards only — pick <span className="font-semibold">Images</span> in the Mode menu below to practice them (image boards aren't SM-2-scheduled).
+            </div>
+          )}
+
           {/* Mode dropdown — native <select> for keyboard + screen-reader
               behavior. Panels stay MOUNTED and are only CSS-hidden, so drafts
               and edit-modes survive switches. */}
