@@ -2395,6 +2395,14 @@ function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRena
   const [renaming, setRenaming] = useState(false);
   const [activeTab, setActiveTab] = useState("flip");
   const [isAdding, setIsAdding] = useState(false);   // creation hub open?
+  // Esc closes the hub (draft-safe: it only hides — nothing unmounts, so an
+  // accidental Esc never loses a half-typed item; reopen and it's all there).
+  useEffect(() => {
+    if (!isAdding) return;
+    const onKey = (e) => { if (e.key === "Escape") setIsAdding(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isAdding]);
   const p = progress[deck.id] || blankProg();
   const counts = { flip: deck.cards?.length || 0, gap: deck.gaps?.length || 0, quiz: (deck.mcqs || []).length, images: occlusions?.length || 0 };
   const totalItems = counts.flip + counts.gap + counts.quiz + counts.images;
@@ -2452,7 +2460,17 @@ function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRena
               dropdown choice, and per-panel edit-modes all survive closing.
               The item lists live at the bottom of each panel, so they stay
               behind this toggle instead of cluttering the study stage. */}
-          <div className={isAdding ? "mt-5" : "hidden"}>
+          {/* Expanding IN-FLOW panel (deliberately not a modal: no focus-trap/
+              scroll-lock machinery needed, and safer for drafts). The
+              grid-rows 0fr→1fr trick animates open to auto height while the
+              children stay MOUNTED the whole time — visibility (not display/
+              unmount) hides the closed state, which also removes the hidden
+              fields from tab order. Reduced motion skips the animation. */}
+          <div
+            aria-hidden={!isAdding}
+            className={`grid transition-[grid-template-rows,margin] duration-300 ease-out motion-reduce:transition-none ${isAdding ? "mt-5 grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
+          >
+          <div className={`min-h-0 overflow-hidden transition-[visibility] duration-300 motion-reduce:transition-none ${isAdding ? "visible" : "invisible"}`}>
           {/* Mode dropdown — native <select> for keyboard + screen-reader
               behavior. Panels stay MOUNTED and are only CSS-hidden, so drafts
               and edit-modes survive switches. */}
@@ -2486,6 +2504,7 @@ function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRena
           <div className={activeTab === "images" ? "" : "hidden"}>
             <ImagesPanel deck={deck} occlusions={occlusions} adding={isAdding} onStudyImages={onStudyImages} onNewImage={onNewImage} onEditImage={onEditImage} onDeleteImage={onDeleteImage} />
           </div>
+          </div>
           </div>{/* /creation hub */}
 
           {/* Central stage — THE study entry point, centered in the leftover
@@ -2517,10 +2536,14 @@ function ProjectView({ deck, occlusions, progress, lastProg, srs, onBack, onRena
                   </div>
                 </div>
               )
-            ) : (
+            ) : totalItems > 0 ? (
               <div className="w-full max-w-xl rounded-2xl border border-dashed border-slate-300 px-6 py-5 text-center text-sm text-slate-500">
                 This project has image cards only — open <span className="font-semibold">+</span> and pick <span className="font-semibold">Images</span> to practice a board (image boards aren't SM-2-scheduled).
               </div>
+            ) : (
+              /* Empty project with the hub open: don't show the misleading
+                 "images only" card — just a quiet hint under the hub. */
+              <p className="text-sm text-slate-400">Items you add above will appear here, ready to study.</p>
             )}
           </div>
         </>
