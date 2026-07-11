@@ -1131,8 +1131,11 @@ function Header({ inStudy, onBack, onSettings, minimal, backLabel = "Exit" }) {
     </header>
   );
 }
-function Collapsible({ title, titleNode, subtitle, defaultOpen = true, right, children }) {
+function Collapsible({ title, titleNode, subtitle, defaultOpen = true, forceOpen = false, right, children }) {
   const [open, setOpen] = useState(defaultOpen);
+  // Additive: lets a parent auto-expand this card (e.g. a file's "+" opening
+  // its inline create form) without converting to a fully-controlled component.
+  useEffect(() => { if (forceOpen) setOpen(true); }, [forceOpen]);
   // NOTE: no `overflow-hidden` here — it would clip the Settings dropdown menus
   // rendered from the header `right` slot. Corners are kept rounded via rounded-2xl.
   return (
@@ -1214,10 +1217,41 @@ function Menu({ items, align = "right" }) {
 function AutoTextarea({ value, onChange, className = "", minRows = 2, innerRef, ...rest }) {
   const localRef = useRef(null);
   const ref = innerRef || localRef;
+
+  // Fit height to content — with the HIDDEN-CONTAINER guard: inside a
+  // display:none wrapper (collapsed creation hub / inactive mode panel)
+  // scrollHeight measures 0, and locking THAT in as an inline height is
+  // exactly the "squished until an unrelated re-render" bug. If we can't get
+  // a real measurement, leave height:auto so the rows= attribute provides the
+  // guaranteed base size (rows is the single source of the minimum — no CSS
+  // min-h to fight it).
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight}px`;
+  };
+
+  useEffect(fit, [value, ref]); // grow/shrink while typing
+
+  // Re-measure when the textarea actually BECOMES measurable. A
+  // ResizeObserver on the element fires after layout whenever its box
+  // changes — including 0 → real width when a hidden ancestor is revealed —
+  // so every open path (+ toggle, mode switch, grid expand) re-fits
+  // automatically, with valid dimensions, without transitionend bookkeeping.
   useEffect(() => {
     const el = ref.current;
-    if (el) { el.style.height = "auto"; el.style.height = `${el.scrollHeight}px`; }
-  }, [value, ref]);
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastW = el.offsetWidth;
+    const ro = new ResizeObserver(() => {
+      const w = el.offsetWidth;
+      if (w > 0 && w !== lastW) { lastW = w; fit(); }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ref]);
+
   return <textarea ref={ref} rows={minRows} value={value} onChange={onChange} className={`resize-none overflow-hidden ${className}`} {...rest} />;
 }
 function Field({ label, hint, children }) {
@@ -1970,7 +2004,22 @@ function ProjectCard({ deck, imageCount, srs, prog, onOpen, onRename, onDelete, 
 function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCreateProject, onRenameProject, onDeleteProject, onPinProject, onSetFolder, onCreateFolder, onRenameFolder, onSetFolderDesc, onDeleteFolder, onRestoreFolder, onPurgeFolder, onPinFolder, onImportProject }) {
   const dark = useContext(ThemeCtx);
   const [creatingFolder, setCreatingFolder] = useState(false);
-  const [creatingProject, setCreatingProject] = useState(false);
+  // WHICH file is adding a project (null = no inline form open). Single value
+  // by design: opening on a second file closes the first (a half-typed name
+  // there closes with it — accepted trade for a simple name field).
+  const [creatingProjectFileId, setCreatingProjectFileId] = useState(null);
+  const [createErr, setCreateErr] = useState(null);
+  const createFormRef = useRef(null);
+  // Bring the freshly-opened inline form into view (the file card may be off
+  // screen); a short tick lets the accordion expand first. Reduced-motion aware.
+  useEffect(() => {
+    if (!creatingProjectFileId) return;
+    const t = setTimeout(() => {
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      createFormRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+    }, 60);
+    return () => clearTimeout(t);
+  }, [creatingProjectFileId]);
   const [renameFolderId, setRenameFolderId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // folder pending inline delete-confirm
   const [importMsg, setImportMsg] = useState(null);
@@ -1992,7 +2041,6 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
   const [fdesc, setFdesc] = useState("");
   const [pname, setPname] = useState("");
   const [pdesc, setPdesc] = useState("");
-  const [pfolder, setPfolder] = useState("");
   const imgCount = (deckId) => occlusions.filter((o) => o.projectId === deckId).length;
 
   // Sort: pinned first, then most-recently-opened first.
@@ -2022,10 +2070,21 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
   }).filter((g) => !g._hide);
 
   function submitFolder() { if (!fname.trim()) return; onCreateFolder(fname.trim(), fdesc.trim()); setFname(""); setFdesc(""); setCreatingFolder(false); }
-  // open=false → save & close, but stay on the folder view (no auto-navigate).
-  function submitProject() { if (!pname.trim()) return; onCreateProject(pname.trim(), pdesc.trim() || "Custom project.", pfolder || null, false); setPname(""); setPdesc(""); setPfolder(""); setCreatingProject(false); }
-  // Open the project form pre-selected for a specific file.
-  function openProjectForm(folderId) { setPfolder(folderId || ""); setPname(""); setPdesc(""); setCreatingFolder(false); setCreatingProject(true); }
+  // open=false → save & close, stay on the folder view. Routed through the
+  // EXISTING createDeck writer (IndexedDB + sync outbox) — no parallel path.
+  // Success/cancel close the form; a FAILED create keeps it open with the
+  // typed value + an error instead of silently losing the input.
+  async function submitProject() {
+    if (!pname.trim() || !creatingProjectFileId) return;
+    try {
+      await onCreateProject(pname.trim(), pdesc.trim() || "Custom project.", creatingProjectFileId, false);
+      setPname(""); setPdesc(""); setCreateErr(null); setCreatingProjectFileId(null);
+    } catch {
+      setCreateErr("Couldn't create the project — your input was kept, try again.");
+    }
+  }
+  // Open the inline form INSIDE a specific file's card (auto-expands it).
+  function openProjectForm(folderId) { setPname(""); setPdesc(""); setCreateErr(null); setCreatingFolder(false); setCreatingProjectFileId(folderId); }
   // Shared styling so the folder "+" button matches the Settings dropdown button.
   const iconBtn = `flex items-center justify-center rounded-lg border p-1.5 transition ${dark ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900"}`;
   const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100";
@@ -2037,7 +2096,7 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
             <FileUp className="h-4 w-4" /> Import project
             <input type="file" accept=".medhub,application/json" className="hidden" onChange={(e) => { handleImport(e.target.files?.[0]); e.target.value = ""; }} />
           </label>
-          <button onClick={() => { setCreatingFolder((v) => !v); setCreatingProject(false); }} className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-white px-4 py-2.5 text-sm font-semibold text-indigo-600 shadow-sm transition hover:bg-indigo-50 active:scale-95"><FolderPlus className="h-4 w-4" /> New file</button>
+          <button onClick={() => { setCreatingFolder((v) => !v); setCreatingProjectFileId(null); }} className="flex items-center gap-2 rounded-xl border border-indigo-200 bg-white px-4 py-2.5 text-sm font-semibold text-indigo-600 shadow-sm transition hover:bg-indigo-50 active:scale-95"><FolderPlus className="h-4 w-4" /> New file</button>
       </div>
       {importMsg && <p className={`mb-4 text-sm font-medium ${importMsg.ok ? "text-emerald-600" : "text-rose-500"}`}>{importMsg.text}</p>}
 
@@ -2061,16 +2120,8 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
         </div>
       )}
 
-      {creatingProject && (
-        <div className="mb-6 rounded-2xl border-2 border-indigo-200 bg-indigo-50/40 p-5">
-          <Field label="Project name"><input autoFocus value={pname} onChange={(e) => setPname(e.target.value)} placeholder="e.g. Lecture 3: Cranial Nerves" className={inputCls} /></Field>
-          <Field label="Description (optional)"><input value={pdesc} onChange={(e) => setPdesc(e.target.value)} placeholder="What's this project about?" className={inputCls} /></Field>
-          <div className="flex gap-2">
-            <button disabled={!pname.trim()} onClick={submitProject} className={`flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow transition active:scale-95 ${pname.trim() ? "hover:opacity-90" : "cursor-not-allowed opacity-40"}`}><Plus className="h-4 w-4" /> Create project</button>
-            <button onClick={() => setCreatingProject(false)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"><X className="h-4 w-4" /> Cancel</button>
-          </div>
-        </div>
-      )}
+      {/* (Global "Create Project" form removed — creation is now INLINE
+          inside the specific file card, via the file's "+" button.) */}
 
       {q && visibleGroups.length === 0 && <p className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-400">No projects match “{query}”.</p>}
       {!q && groups.length === 0 && (
@@ -2086,6 +2137,7 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
           // Files are COLLAPSED by default; a search auto-expands them so matches show.
           key={`${g.folder?.id || "uncat"}-${q ? "search" : "browse"}`}
           defaultOpen={!!q}
+          forceOpen={!!g.folder && creatingProjectFileId === g.folder.id}
           titleNode={<FolderTitle folder={g.folder} onRename={g.folder ? onRenameFolder : null} editing={g.folder ? renameFolderId === g.folder.id : undefined} onEditingChange={g.folder ? ((v) => setRenameFolderId(v ? g.folder.id : null)) : undefined} />}
           subtitle={`${g.items.length} ${g.items.length === 1 ? "project" : "projects"}`}
           right={g.folder ? (
@@ -2108,10 +2160,25 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
           ) : null}
         >
           {g.folder && <div className="mb-3"><InlineDesc value={g.folder.description} onSave={(t) => onSetFolderDesc(g.folder.id, t)} placeholder="Add a file description…" /></div>}
-          {g.items.length === 0 ? <p className="text-sm text-slate-400">No projects in this file yet. Use the file's “+” button above to add one.</p> : (
+          {g.items.length > 0 && (
             <div className="flex flex-col gap-3">
               {sortItems(g.items).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} prog={progress[deck.id]} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
             </div>
+          )}
+          {/* Inline create form — rendered INSIDE this file's body (below its
+              projects / replacing the empty text) only for the active file. */}
+          {g.folder && creatingProjectFileId === g.folder.id ? (
+            <div ref={createFormRef} className={`${g.items.length > 0 ? "mt-3" : ""} rounded-xl border-2 border-indigo-200 bg-indigo-50/40 p-4`}>
+              <Field label="Project name"><input autoFocus value={pname} onChange={(e) => setPname(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitProject(); }} placeholder="e.g. Lecture 3: Cranial Nerves" className={inputCls} /></Field>
+              <Field label="Description (optional)"><input value={pdesc} onChange={(e) => setPdesc(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitProject(); }} placeholder="What's this project about?" className={inputCls} /></Field>
+              {createErr && <p className="mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{createErr}</p>}
+              <div className="flex gap-2">
+                <button disabled={!pname.trim()} onClick={submitProject} className={`flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-500 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow transition active:scale-95 ${pname.trim() ? "hover:opacity-90" : "cursor-not-allowed opacity-40"}`}><Plus className="h-4 w-4" /> Create project</button>
+                <button onClick={() => { setCreatingProjectFileId(null); setCreateErr(null); }} className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"><X className="h-4 w-4" /> Cancel</button>
+              </div>
+            </div>
+          ) : (
+            g.items.length === 0 && <p className="text-sm text-slate-400">No projects in this file yet. Use the file's “+” button above to add one.</p>
           )}
         </Collapsible>
       ))}
