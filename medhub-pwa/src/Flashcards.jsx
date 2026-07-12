@@ -429,15 +429,22 @@ const projectDue = (prev, grade, s) => schedule(prev, grade, s, Date.now(), () =
 // (learning/relearning) cards go back in 2–3 ahead (or the end if ≤2 remain).
 // A per-card re-insert cap guards against pathological infinite loops (leeches).
 const MAX_REINSERTS = 12;
-function requeue(queue, id, graduated, counts) {
+// ONE re-insertion engine for every session type. `item` is whatever the
+// queue holds (a plain id for flip/gap/quiz sessions, a {type,id} entry for
+// the MIXED queue — re-inserted entries keep their type, so the polymorphic
+// renderer keeps showing the right UI). `key` is the string used for the
+// MAX_REINSERTS tally (defaults to the item itself for id-queues; the mixed
+// queue passes entry.id). Returns `parked: true` when the cap kicks in so
+// callers can surface a leech notice.
+function requeue(queue, item, graduated, counts, key = item) {
   const rest = queue.slice(1);
   if (graduated) return { queue: rest, counts };
-  const n = (counts[id] || 0) + 1;
-  const c2 = { ...counts, [id]: n };
-  if (n > MAX_REINSERTS) return { queue: rest, counts: c2 };       // safety: stop looping
-  if (rest.length <= 2) return { queue: [...rest, id], counts: c2 };
+  const n = (counts[key] || 0) + 1;
+  const c2 = { ...counts, [key]: n };
+  if (n > MAX_REINSERTS) return { queue: rest, counts: c2, parked: true };  // safety: stop looping (leech)
+  if (rest.length <= 2) return { queue: [...rest, item], counts: c2 };
   const p = Math.min(2 + Math.floor(Math.random() * 2), rest.length); // 2–3 ahead
-  return { queue: [...rest.slice(0, p), id, ...rest.slice(p)], counts: c2 };
+  return { queue: [...rest.slice(0, p), item, ...rest.slice(p)], counts: c2 };
 }
 function fmtUntil(due) {
   const min = Math.max(1, Math.round((due - Date.now()) / MIN));
@@ -659,7 +666,7 @@ export default function App() {
       const quizById = {};
       const dueQuiz = quizItems.filter((q) => { quizById[q.id] = q; return includeAll || isDue(srs, q.id); }).map((q) => ({ type: "quiz", id: q.id }));
       const queue = interleave([dueCards, dueGaps, dueQuiz]);
-      setSession({ ...base, queue, index: 0, total: queue.length, quizById, results: { again: 0, hard: 0, good: 0, easy: 0 }, correct: 0, flipped: false, revealed: false, selected: null, answered: false, caughtUp: queue.length === 0 });
+      setSession({ ...base, queue, index: 0, total: queue.length, quizById, results: { again: 0, hard: 0, good: 0, easy: 0 }, correct: 0, graduated: 0, leeches: 0, flipped: false, revealed: false, selected: null, answered: false, lastGraduated: false, caughtUp: queue.length === 0 });
     }
   }
   const endSession = () => setSession(null);
@@ -1768,36 +1775,51 @@ function MixedView({ deck, session, setSession, srs, settings, onReview, onRecor
   if (!item) return <AllCaughtUp onHome={onHome} />;
   const prev = srs[item.id];
 
-  // Advance to the next item, or finish. Carries the freshly-updated tallies.
-  function step(results, correct) {
-    const next = session.index + 1;
-    if (next >= session.queue.length) {
-      setSession({ ...session, results, correct, index: next, done: true });
+  // CONTINUOUS LEARNING LOOP (restored for the mixed queue): the current
+  // entry is popped and — when it did NOT graduate (schedule()'s resulting
+  // phase is still learning/relearning, NOT which button was pressed) — it's
+  // re-inserted 2–3 items ahead via the SAME requeue() + MAX_REINSERTS engine
+  // the per-type sessions use. The session finishes only when this dynamic
+  // queue drains; a leech that hits the cap parks and is counted.
+  function advance(graduatedNow, results, correct) {
+    const remaining = session.queue.slice(session.index);          // [0] = current entry
+    const { queue: rest, counts, parked } = requeue(remaining, item, graduatedNow, session.reinserts || {}, item.id);
+    const queue = [...session.queue.slice(0, session.index), ...rest];
+    const graduated = (session.graduated || 0) + (graduatedNow ? 1 : 0);
+    const leeches = (session.leeches || 0) + (parked ? 1 : 0);
+    const base = { ...session, results, correct, queue, reinserts: counts, graduated, leeches };
+    if (rest.length === 0) {
+      setSession({ ...base, done: true });
       onFinish(deck.id, "mixed", { again: results.again || 0, hard: results.hard || 0, good: results.good || 0, easy: results.easy || 0, total });
     } else {
-      setSession({ ...session, results, correct, index: next, flipped: false, revealed: false, selected: null, answered: false });
+      setSession({ ...base, flipped: false, revealed: false, selected: null, answered: false, lastGraduated: false });
     }
   }
   // flashcards + gaps: manual SM-2 rating via the shared RatingButtons.
+  // Re-insertion keys off schedule()'s RESULT (phase), never the button —
+  // "Hard" on a learning card correctly keeps it in the session, like Anki.
   function rate(key) {
-    onReview(item.id, key);
+    const changes = onReview(item.id, key);          // SM-2 → persists via the existing writer/outbox
     onRecordFlip(deck.id, key);
-    step({ ...session.results, [key]: (session.results[key] || 0) + 1 }, session.correct);
+    advance(changes.phase === "review", { ...session.results, [key]: (session.results[key] || 0) + 1 }, session.correct);
   }
-  // quiz: auto-grade (correct → good, wrong → again), same as QuizView.
+  // quiz: auto-grade (correct → good, wrong → again), same as QuizView; the
+  // graduation verdict is stored so the Next button can requeue correctly.
   const quiz = item.type === "quiz" ? session.quizById[item.id] : null;
   function choose(opt) {
     if (session.answered) return;
     const ok = opt === quiz.answer;
-    onReview(item.id, ok ? "good" : "again");
+    const changes = onReview(item.id, ok ? "good" : "again");
     onRecordQuiz(deck.id, ok);
-    setSession({ ...session, selected: opt, answered: true, results: { ...session.results, [ok ? "good" : "again"]: (session.results[ok ? "good" : "again"] || 0) + 1 }, correct: session.correct + (ok ? 1 : 0) });
+    setSession({ ...session, selected: opt, answered: true, lastGraduated: changes.phase === "review", results: { ...session.results, [ok ? "good" : "again"]: (session.results[ok ? "good" : "again"] || 0) + 1 }, correct: session.correct + (ok ? 1 : 0) });
   }
 
   const kindLabel = item.type === "flip" ? "Flashcard" : item.type === "gap" ? "Fill the gap" : "Quiz";
   return (
     <div className="pb-40">
-      <MixedProgress index={session.index} total={total} />
+      {/* Progress = items GRADUATED (not queue position — the dynamic queue
+          grows when items are re-inserted, so position would run backwards). */}
+      <MixedProgress index={session.graduated || 0} total={total} />
       <div className="mx-auto w-full max-w-2xl">
         <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-xl dark:border-white/10 dark:bg-white/5">
           <span className="mb-5 inline-block rounded-full bg-med-primary-soft px-3 py-1 text-xs font-semibold uppercase tracking-wide text-med-primary dark:bg-[#1B98E0]/20 dark:text-[#63C4F1]">{kindLabel}</span>
@@ -1857,7 +1879,7 @@ function MixedView({ deck, session, setSession, srs, settings, onReview, onRecor
             ? <RatingButtons prev={prev} settings={settings} onGrade={rate} />
             : <button onClick={() => setSession({ ...session, revealed: true, flipped: true })} className={`flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r ${deck.accent} px-4 py-3 font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95`}><Lightbulb className="h-4 w-4" /> Reveal answer</button>)}
           {item.type === "quiz" && (session.answered
-            ? <button onClick={() => step(session.results, session.correct)} className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 font-semibold text-white shadow-md transition hover:bg-slate-800 active:scale-95 dark:bg-white/10">{session.index + 1 >= total ? "Finish" : "Next"}</button>
+            ? <button onClick={() => advance(!!session.lastGraduated, session.results, session.correct)} className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 font-semibold text-white shadow-md transition hover:bg-slate-800 active:scale-95 dark:bg-white/10">{session.queue.length - session.index <= 1 && session.lastGraduated ? "Finish" : "Next"}</button>
             : <p className="py-3 text-center text-sm text-slate-400">Choose the correct answer.</p>)}
         </div>
       </div>
@@ -2970,6 +2992,11 @@ function CompleteView({ session, deck, total, onRestart, onHome }) {
       <div className="rounded-3xl border border-slate-200 bg-white p-10 shadow-xl">
         <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 text-white shadow-lg shadow-amber-200"><Trophy className="h-8 w-8" /></div>
         <h2 className="text-2xl font-bold text-slate-900">{titles[mode]}</h2>
+        {(session.leeches || 0) > 0 && (
+          <p className="mx-auto mt-2 max-w-sm rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
+            {session.leeches} item{session.leeches === 1 ? "" : "s"} hit the re-review cap ({MAX_REINSERTS}×) and {session.leeches === 1 ? "was" : "were"} set aside as a leech — SM-2 will bring {session.leeches === 1 ? "it" : "them"} back due; consider rewriting {session.leeches === 1 ? "it" : "them"}.
+          </p>
+        )}
         <p className="mt-2 text-sm text-slate-500">You finished all {total} {nouns[mode]} in <span className="font-medium text-slate-700">{deck.title}</span>.</p>
         <div className={`mt-7 grid gap-3 ${stats.length === 4 ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3"}`}>{stats.map((s) => <div key={s.label} className={`rounded-xl ${s.bg} p-4`}><div className={`text-2xl font-bold ${s.color}`}>{s.value}</div><div className="text-xs font-medium text-slate-500">{s.label}</div></div>)}</div>
         <div className="mt-8 flex flex-col gap-3 sm:flex-row">
