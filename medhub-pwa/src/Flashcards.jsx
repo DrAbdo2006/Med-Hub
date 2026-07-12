@@ -5,7 +5,7 @@ import { assetRepo } from "./db";
 import { supabase } from "./lib/supabaseClient";
 import { useAuth } from "./AuthProvider";
 import { useTheme } from "./ThemeProvider";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { startSync, onSyncStatus, retryParked } from "./lib/sync";
 import { useAsset, useMedHubStore } from "./useMedHubStore";
 import { RATING_META, RATING_ORDER, textClass, softBgClass, borderClass, fillHex, initial } from "./ratingStyles";
@@ -341,6 +341,20 @@ const DEFAULT_SETTINGS = {
   minEase: 1.3,
 };
 
+// ---------------------------------------------------------------------------
+// PER-TYPE SCHEDULER CONFIG — MCQs skip learning steps, so a FIRST-TRY-correct
+// answer ("Good") graduates straight to review: phase='review', the normal
+// graduatingInterval (~1 day), ease UNCHANGED. This fixes "correct MCQs keep
+// re-queuing in the session" without the Easy-rating side effects (ease +0.15,
+// easyInterval×easyBonus ≈ 5 days) that would make quizzes resurface too
+// rarely. NOTE: schedule() treats an EMPTY steps array as "use defaults" (its
+// safety fallback), so "no learning steps" is expressed as a single 0-minute
+// step — Good from step 0 overflows the last step and graduates immediately.
+// This is a CONFIG passed at the call site; the SM-2 algorithm is untouched,
+// and Flashcards/Gaps keep the default multi-step config.
+// ---------------------------------------------------------------------------
+const mcqSchedulerConfig = (s) => ({ ...s, learningStepsMin: [0] });
+
 const clampIvl = (d, s) => Math.min(s.maximumInterval ?? 36500, Math.max(s.minimumInterval ?? 1, d));
 
 // Anki interval fuzz. Applies to day-intervals ≥ 2.5 only. rng() in [0,1).
@@ -620,8 +634,10 @@ export default function App() {
   // rating ∈ {again,hard,good,easy}. schedule() → ONE granular patchCard write.
   // srs is DERIVED from the flashcard rows, so it updates reactively after the
   // write. Returns the changes so the study queue can read the new phase.
-  const review = (id, grade) => {
-    const changes = schedule(srs[id], grade, srsSettings);
+  // `settingsOverride` = optional per-type scheduler config (e.g. MCQs pass
+  // mcqSchedulerConfig); the persistence path is identical either way.
+  const review = (id, grade, settingsOverride) => {
+    const changes = schedule(srs[id], grade, settingsOverride || srsSettings);
     writers.patchCard(id, changes);   // single IndexedDB write
     return changes;
   };
@@ -782,7 +798,7 @@ export default function App() {
           : session.mode === "mixed" ? <MixedView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecordFlip={recordFlip} onRecordQuiz={recordQuiz} onFinish={recordLast} onHome={endSession} />
           : session.mode === "flip" ? <StudyView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />
           : session.mode === "gap" ? <GapView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />
-          : <QuizView deck={deck} session={session} setSession={setSession} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />}
+          : <QuizView deck={deck} session={session} setSession={setSession} settings={srsSettings} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />}
       </Shell>
     );
   }
@@ -1140,38 +1156,62 @@ function Header({ inStudy, onBack, onSettings, minimal, backLabel = "Exit" }) {
 }
 function Collapsible({ title, titleNode, subtitle, defaultOpen = true, forceOpen = false, right, children }) {
   const [open, setOpen] = useState(defaultOpen);
+  const reduced = useReducedMotion();
   // Additive: lets a parent auto-expand this card (e.g. a file's "+" opening
   // its inline create form) without converting to a fully-controlled component.
   useEffect(() => { if (forceOpen) setOpen(true); }, [forceOpen]);
-  // NOTE: no `overflow-hidden` here — it would clip the Settings dropdown menus
-  // rendered from the header `right` slot. Corners are kept rounded via rounded-2xl.
+  // Shared spring for the body AND the chevron; reduced motion → instant.
+  const spring = reduced ? { duration: 0 } : { type: "spring", bounce: 0.35, duration: 0.5 };
+  const chevron = (
+    <motion.span animate={{ rotate: open ? 0 : -90 }} transition={spring} className="inline-flex shrink-0">
+      <ChevronDown className="h-5 w-5 text-white/80" />
+    </motion.span>
+  );
   return (
-    <div className="mb-4 rounded-2xl border border-slate-200 bg-white shadow-sm transition-all duration-300 ease-in-out hover:shadow-md hover:border-med-primary">
+    <div className="mb-4 rounded-2xl border border-white/25 bg-[#1B98E0] shadow-sm transition-all duration-300 ease-in-out hover:border-white/50 hover:shadow-md">
       <div className="relative flex items-center justify-between gap-3 px-5 py-4">
         {titleNode ? (
           <div className="flex min-w-0 flex-1 items-center gap-3">
-            <button onClick={() => setOpen((o) => !o)} className="shrink-0"><ChevronDown className={`h-5 w-5 text-slate-400 transition-transform ${open ? "" : "-rotate-90"}`} /></button>
-            <div className="min-w-0">{titleNode}{subtitle && <span className="block text-xs text-slate-400">{subtitle}</span>}</div>
+            <button onClick={() => setOpen((o) => !o)} className="shrink-0">{chevron}</button>
+            <div className="min-w-0">{titleNode}{subtitle && <span className="block text-xs font-medium text-white/75">{subtitle}</span>}</div>
           </div>
         ) : (
           <button onClick={() => setOpen((o) => !o)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
-            <ChevronDown className={`h-5 w-5 shrink-0 text-slate-400 transition-transform ${open ? "" : "-rotate-90"}`} />
-            <span className="min-w-0"><span className="block truncate font-semibold text-slate-900">{title}</span>{subtitle && <span className="block text-xs text-slate-400">{subtitle}</span>}</span>
+            {chevron}
+            <span className="min-w-0"><span className="block truncate font-semibold text-white">{title}</span>{subtitle && <span className="block text-xs font-medium text-white/75">{subtitle}</span>}</span>
           </button>
         )}
         {right && <div className="flex shrink-0 items-center gap-2">{right}</div>}
       </div>
-      {open && <div className="border-t border-slate-100 p-5">{children}</div>}
+      {/* Spring accordion. overflow is HIDDEN during the height animation
+          (content would spill mid-spring) and released to VISIBLE on settle
+          via transitionEnd — otherwise the ProjectCard "⋯" dropdown menus
+          inside the body would be clipped. AnimatePresence unmounts on close
+          (needed for the exit spring); the inline create-project draft is
+          safe because its state lives in LibraryView, not in this subtree. */}
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="body"
+            initial={reduced ? false : { height: 0, opacity: 0, overflow: "hidden" }}
+            animate={{ height: "auto", opacity: 1, transitionEnd: { overflow: "visible" } }}
+            exit={{ height: 0, opacity: 0, overflow: "hidden" }}
+            transition={spring}
+          >
+            <div className="border-t border-white/20 p-5">{children}</div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 // Folder header (no icon). Rename is driven only from the menu (clickToEdit=false).
 function FolderTitle({ folder, onRename, editing, onEditingChange }) {
-  if (!folder) return <span className="font-semibold text-slate-500">Deleted files</span>;
+  if (!folder) return <span className="font-semibold text-white/85">Deleted files</span>;
   return (
     <span className="flex items-center gap-2">
-      {onRename ? <EditableTitle value={folder.title} onChange={(t) => onRename(folder.id, t)} editing={editing} onEditingChange={onEditingChange} clickToEdit={false} className="font-semibold text-slate-900" /> : <span className="font-semibold text-slate-900">{folder.title}</span>}
-      {folder.pinned && <Pin className="h-3.5 w-3.5 fill-indigo-500 text-indigo-500" />}
+      {onRename ? <EditableTitle value={folder.title} onChange={(t) => onRename(folder.id, t)} editing={editing} onEditingChange={onEditingChange} clickToEdit={false} className="font-semibold text-white" /> : <span className="font-semibold text-white">{folder.title}</span>}
+      {folder.pinned && <Pin className="h-3.5 w-3.5 fill-white text-white" />}
     </span>
   );
 }
@@ -1584,7 +1624,7 @@ function GapView({ deck, session, setSession, srs, settings, onReview, onRecord,
 // ---------------------------------------------------------------------------
 // Quiz
 // ---------------------------------------------------------------------------
-function QuizView({ deck, session, setSession, onReview, onRecord, onFinish }) {
+function QuizView({ deck, session, setSession, settings, onReview, onRecord, onFinish }) {
   const total = session.total || 1;
   const item = session.quiz.find((q) => q.id === session.queue[0]);
   const pct = Math.round((session.graduated / total) * 100);
@@ -1592,9 +1632,13 @@ function QuizView({ deck, session, setSession, onReview, onRecord, onFinish }) {
   function choose(opt) {
     if (session.answered || !item) return;
     const correct = opt === item.answer;
-    const changes = onReview(item.id, correct ? "good" : "again");   // wrong = Forgot
+    // Per-type config: first-try-correct graduates immediately (no learning
+    // steps, ease untouched); previously-failed items take the normal
+    // stepped path and must be answered correctly again to leave.
+    const firstTry = !(session.failed || {})[item.id];
+    const changes = onReview(item.id, correct ? "good" : "again", correct && firstTry ? mcqSchedulerConfig(settings || DEFAULT_SETTINGS) : undefined);   // wrong = Forgot
     onRecord(deck.id, correct);
-    setSession({ ...session, selected: opt, answered: true, correct: session.correct + (correct ? 1 : 0), lastGraduated: changes.phase === "review" });
+    setSession({ ...session, selected: opt, answered: true, correct: session.correct + (correct ? 1 : 0), lastGraduated: changes.phase === "review", failed: correct ? (session.failed || {}) : { ...(session.failed || {}), [item.id]: true } });
   }
   function next() {
     const { queue, counts } = requeue(session.queue, item.id, !!session.lastGraduated, session.reinserts || {});
@@ -1805,13 +1849,25 @@ function MixedView({ deck, session, setSession, srs, settings, onReview, onRecor
   }
   // quiz: auto-grade (correct → good, wrong → again), same as QuizView; the
   // graduation verdict is stored so the Next button can requeue correctly.
+  // FIRST-TRY-correct MCQs (not in session.failed) use the per-type config so
+  // Good graduates immediately; a previously-FAILED one takes the normal
+  // stepped path — it must earn its way out, no insta-graduate on the retry.
   const quiz = item.type === "quiz" ? session.quizById[item.id] : null;
   function choose(opt) {
     if (session.answered) return;
     const ok = opt === quiz.answer;
-    const changes = onReview(item.id, ok ? "good" : "again");
+    const firstTry = !(session.failed || {})[item.id];
+    const changes = onReview(item.id, ok ? "good" : "again", ok && firstTry ? mcqSchedulerConfig(settings) : undefined);
     onRecordQuiz(deck.id, ok);
-    setSession({ ...session, selected: opt, answered: true, lastGraduated: changes.phase === "review", results: { ...session.results, [ok ? "good" : "again"]: (session.results[ok ? "good" : "again"] || 0) + 1 }, correct: session.correct + (ok ? 1 : 0) });
+    setSession({
+      ...session,
+      selected: opt,
+      answered: true,
+      lastGraduated: changes.phase === "review",
+      failed: ok ? (session.failed || {}) : { ...(session.failed || {}), [item.id]: true },
+      results: { ...session.results, [ok ? "good" : "again"]: (session.results[ok ? "good" : "again"] || 0) + 1 },
+      correct: session.correct + (ok ? 1 : 0),
+    });
   }
 
   const kindLabel = item.type === "flip" ? "Flashcard" : item.type === "gap" ? "Fill the gap" : "Quiz";
@@ -1961,16 +2017,16 @@ const masteryPct = (p) => {
   const reviews = p?.reviews || 0;
   return reviews ? Math.round((((p.good || 0) + (p.easy || 0)) / reviews) * 100) : 0;
 };
-function MasteryRing({ pct }) {
+function MasteryRing({ pct, trackClass = "stroke-slate-200 dark:stroke-white/10", arc = "#1B98E0", textClass = "text-slate-600" }) {
   const r = 15.5;
   const c = 2 * Math.PI * r;
   return (
     <span className="relative inline-flex h-10 w-10 shrink-0 items-center justify-center" role="img" aria-label={`${pct}% mastery`} title={`${pct}% mastery`}>
       <svg viewBox="0 0 40 40" className="h-10 w-10 -rotate-90" aria-hidden="true">
-        <circle cx="20" cy="20" r={r} fill="none" strokeWidth="4.5" className="stroke-slate-200 dark:stroke-white/10" />
-        <circle cx="20" cy="20" r={r} fill="none" strokeWidth="4.5" strokeLinecap="round" stroke="#1B98E0" strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} />
+        <circle cx="20" cy="20" r={r} fill="none" strokeWidth="4.5" className={trackClass} />
+        <circle cx="20" cy="20" r={r} fill="none" strokeWidth="4.5" strokeLinecap="round" stroke={arc} strokeDasharray={c} strokeDashoffset={c * (1 - pct / 100)} />
       </svg>
-      <span className="absolute text-[9px] font-bold leading-none text-slate-600">{pct}%</span>
+      <span className={`absolute text-[9px] font-bold leading-none ${textClass}`}>{pct}%</span>
     </span>
   );
 }
@@ -1980,28 +2036,30 @@ function ProjectCard({ deck, imageCount, srs, prog, onOpen, onRename, onDelete, 
   const [confirmDel, setConfirmDel] = useState(false);
   const due = dueCount(deck, srs);
   return (
-    <div className={`w-full rounded-2xl border bg-white shadow-sm transition-all duration-300 ease-in-out hover:shadow-md hover:border-med-primary ${deck.pinned ? "border-indigo-200 ring-1 ring-indigo-100" : "border-slate-200"}`}>
+    <div className={`w-full rounded-2xl border bg-[#1B98E0] shadow-sm transition-all duration-300 ease-in-out hover:shadow-md hover:border-white/70 ${deck.pinned ? "border-white/70 ring-1 ring-white/40" : "border-white/25"}`}>
       {/* Full-width row: name + description · stats · actions */}
       <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:gap-4">
         {/* Name + description */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <EditableTitle value={deck.title} onChange={(t) => onRename(deck.id, t)} editing={renaming} onEditingChange={setRenaming} clickToEdit={false} className="truncate font-semibold text-slate-900" />
-            {deck.pinned && <Pin className="h-4 w-4 shrink-0 fill-indigo-500 text-indigo-500" />}
+            <EditableTitle value={deck.title} onChange={(t) => onRename(deck.id, t)} editing={renaming} onEditingChange={setRenaming} clickToEdit={false} className="truncate font-semibold text-white" />
+            {deck.pinned && <Pin className="h-4 w-4 shrink-0 fill-white text-white" />}
           </div>
-          {deck.description && <p className="mt-0.5 truncate text-xs text-slate-500">{deck.description}</p>}
+          {deck.description && <p className="mt-0.5 truncate text-xs text-white/80">{deck.description}</p>}
         </div>
-        {/* Stats */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400 sm:shrink-0">
-          <MasteryRing pct={masteryPct(prog)} />
+        {/* Stats — solid white + medium weight: on #1B98E0 white measures only
+            ~3.2:1, so tiny text needs all the weight/opacity it can get. */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-white/90 sm:shrink-0">
+          <MasteryRing pct={masteryPct(prog)} trackClass="stroke-white/30" arc="#ffffff" textClass="text-white" />
           <span className="flex items-center gap-1" title="Flashcards"><Layers className="h-3.5 w-3.5" />{deck.cards.length}</span>
           <span className="flex items-center gap-1" title="Gaps"><AlignLeft className="h-3.5 w-3.5" />{deck.gaps.length}</span>
           <span className="flex items-center gap-1" title="Images"><ImageIcon className="h-3.5 w-3.5" />{imageCount}</span>
-          <span className="flex items-center gap-1 text-indigo-500" title="Cards due"><Clock className="h-3.5 w-3.5" />{due} due</span>
+          <span className="flex items-center gap-1 font-semibold text-white" title="Cards due"><Clock className="h-3.5 w-3.5" />{due} due</span>
         </div>
         {/* Actions */}
         <div className="flex shrink-0 items-center gap-2">
-          <button onClick={() => onOpen(deck.id)} className={`flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r ${deck.accent} px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:opacity-90 active:scale-95`}><BookOpen className="h-4 w-4" /> Open project</button>
+          {/* White CTA on the blue card — blue-on-blue would vanish */}
+          <button onClick={() => onOpen(deck.id)} className="flex items-center justify-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-semibold text-[#1577B0] shadow-md transition hover:bg-white/90 active:scale-95"><BookOpen className="h-4 w-4" /> Open project</button>
           <Menu items={[
             { label: deck.pinned ? "Unpin" : "Pin to top", icon: deck.pinned ? PinOff : Pin, onClick: () => onPin(deck.id) },
             { label: "Rename Project", icon: Pencil, onClick: () => setRenaming(true) },
@@ -2107,8 +2165,9 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
   }
   // Open the inline form INSIDE a specific file's card (auto-expands it).
   function openProjectForm(folderId) { setPname(""); setPdesc(""); setCreateErr(null); setCreatingFolder(false); setCreatingProjectFileId(folderId); }
-  // Shared styling so the folder "+" button matches the Settings dropdown button.
-  const iconBtn = `flex items-center justify-center rounded-lg border p-1.5 transition ${dark ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900"}`;
+  // Shared white-on-blue icon buttons for the blue file headers (both themes —
+  // the header is brand blue in light AND dark mode).
+  const iconBtn = "flex items-center justify-center rounded-lg border border-white/30 bg-white/10 p-1.5 text-white transition hover:bg-white/25";
   const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100";
 
   return (
@@ -2172,16 +2231,16 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
               {/* Inline delete confirmation on the row */}
               {confirmDeleteId === g.folder.id ? (
                 <span className="flex items-center gap-1.5">
-                  <button onClick={() => setConfirmDeleteId(null)} className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${dark ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>Cancel</button>
+                  <button onClick={() => setConfirmDeleteId(null)} className="rounded-lg border border-white/30 bg-white/10 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-white/25">Cancel</button>
                   <button onClick={() => { onDeleteFolder(g.folder.id); setConfirmDeleteId(null); }} title="Moves the folder and its projects to Deleted files" className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:bg-rose-700"><Trash2 className="h-3.5 w-3.5" /> Delete</button>
                 </span>
               ) : (
-                <button onClick={() => setConfirmDeleteId(g.folder.id)} title="Delete file" className={`flex items-center justify-center rounded-lg border p-1.5 text-slate-400 transition ${dark ? "border-slate-600 bg-slate-800 hover:bg-rose-950 hover:text-rose-400" : "border-slate-200 bg-white hover:bg-rose-50 hover:text-rose-600"}`}><Trash2 className="h-4 w-4" /></button>
+                <button onClick={() => setConfirmDeleteId(g.folder.id)} title="Delete file" className="flex items-center justify-center rounded-lg border border-white/30 bg-white/10 p-1.5 text-white transition hover:bg-rose-600"><Trash2 className="h-4 w-4" /></button>
               )}
             </>
           ) : null}
         >
-          {g.folder && <div className="mb-3"><InlineDesc value={g.folder.description} onSave={(t) => onSetFolderDesc(g.folder.id, t)} placeholder="Add a file description…" /></div>}
+          {g.folder && <div className="mb-3"><InlineDesc value={g.folder.description} onSave={(t) => onSetFolderDesc(g.folder.id, t)} placeholder="Add a file description…" className="!text-white/80 decoration-white/40" /></div>}
           {g.items.length > 0 && (
             <div className="flex flex-col gap-3">
               {sortItems(g.items).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} prog={progress[deck.id]} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
@@ -2200,7 +2259,7 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
               </div>
             </div>
           ) : (
-            g.items.length === 0 && <p className="text-sm text-slate-400">No projects in this file yet. Use the file's “+” button above to add one.</p>
+            g.items.length === 0 && <p className="text-sm font-medium text-white/85">No projects in this file yet. Use the file's “+” button above to add one.</p>
           )}
         </Collapsible>
       ))}
@@ -2210,7 +2269,7 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
         <Collapsible
           key="deleted-files"
           defaultOpen={false}
-          titleNode={<span className="flex items-center gap-2 font-semibold text-slate-500"><Trash2 className="h-4 w-4" /> Deleted files</span>}
+          titleNode={<span className="flex items-center gap-2 font-semibold text-white/85"><Trash2 className="h-4 w-4" /> Deleted files</span>}
           subtitle={`${trashCount} item${trashCount === 1 ? "" : "s"}`}
         >
           <div className="space-y-4">
@@ -3049,7 +3108,7 @@ export function StudyPane({ deckId, mode }) {
 
   // ---- same wiring as the root component's helpers (fresh closures so the
   // originals stay untouched; identical semantics) ----
-  const review = (id, grade) => { const changes = schedule(srs[id], grade, srsSettings); writers.patchCard(id, changes); return changes; };
+  const review = (id, grade, settingsOverride) => { const changes = schedule(srs[id], grade, settingsOverride || srsSettings); writers.patchCard(id, changes); return changes; };
   const dueOf = (id) => srs[id]?.dueDate ?? srs[id]?.due ?? 0;
   const sortByDue = (items) => [...items].sort((a, b) => dueOf(a.id) - dueOf(b.id));
   const bump = (dId, fn) => { const cur = progress[dId] || blankProg(); writers.setMeta("progress", { ...progress, [dId]: { ...cur, ...fn(cur), lastStudied: Date.now() } }); };
@@ -3090,7 +3149,7 @@ export function StudyPane({ deckId, mode }) {
   }
   if (mode === "flip") return <StudyView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />;
   if (mode === "gap") return <GapView deck={deck} session={session} setSession={setSession} srs={srs} settings={srsSettings} onReview={review} onRecord={recordFlip} onFinish={recordLast} />;
-  return <QuizView deck={deck} session={session} setSession={setSession} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />;
+  return <QuizView deck={deck} session={session} setSession={setSession} settings={srsSettings} onReview={review} onRecord={recordQuiz} onFinish={recordLast} />;
 }
 
 // Image-occlusion pane: same flatten-and-study component the module uses,
