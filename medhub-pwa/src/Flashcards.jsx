@@ -1207,7 +1207,9 @@ function Collapsible({ title, titleNode, subtitle, defaultOpen = true, forceOpen
 }
 // Folder header (no icon). Rename is driven only from the menu (clickToEdit=false).
 function FolderTitle({ folder, onRename, editing, onEditingChange }) {
-  if (!folder) return <span className="font-semibold text-white/85">Deleted files</span>;
+  // null folder = the ACTIVE "Unfiled projects" group (decks synced from a
+  // device whose folder doesn't exist here) — NOT trash.
+  if (!folder) return <span className="font-semibold text-white">Unfiled projects</span>;
   return (
     <span className="flex items-center gap-2">
       {onRename ? <EditableTitle value={folder.title} onChange={(t) => onRename(folder.id, t)} editing={editing} onEditingChange={onEditingChange} clickToEdit={false} className="font-semibold text-white" /> : <span className="font-semibold text-white">{folder.title}</span>}
@@ -2137,8 +2139,17 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
     .filter((f) => f.deleted)
     .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0))
     .map((folder) => ({ folder, items: decks.filter((d) => d.folderId === folder.id) }));
-  const looseTrashed = decks.filter((d) => !d.folderId || !folders.some((f) => f.id === d.folderId));
-  const trashCount = deletedFolderGroups.length + looseTrashed.length;
+  // Decks whose folder doesn't exist on THIS device are ACTIVE, never trash.
+  // Folders don't cloud-sync (v1 syncs decks+cards), so a project created
+  // inside another device's folder arrives here as a folder-orphan — the old
+  // code dumped those into "Deleted files", which is exactly the cross-device
+  // "Mac projects show in mobile Trash" bug. They now render as an active
+  // "Unfiled projects" group; Move to… files them into a local folder.
+  const unfiled = decks.filter((d) => !d.folderId || !folders.some((f) => f.id === d.folderId));
+  if (unfiled.length) groups.push({ folder: null, items: unfiled });
+  // Trash = soft-deleted folders only (a hard-purge cascades its projects, so
+  // no legitimate "loose trashed" deck can exist).
+  const trashCount = deletedFolderGroups.length;
 
   // Live search: match project titles/descriptions; a file whose name matches keeps all its projects.
   const q = query.trim().toLowerCase();
@@ -2289,11 +2300,6 @@ function LibraryView({ folders, decks, occlusions, srs, progress, onOpen, onCrea
                 )}
               </div>
             ))}
-            {looseTrashed.length > 0 && (
-              <div className="flex flex-col gap-3">
-                {sortItems(looseTrashed).map((deck) => <ProjectCard key={deck.id} deck={deck} imageCount={imgCount(deck.id)} srs={srs} prog={progress[deck.id]} onOpen={onOpen} onRename={onRenameProject} onDelete={onDeleteProject} onPin={onPinProject} onExport={exportDeck} onMove={openMove} />)}
-              </div>
-            )}
           </div>
         </Collapsible>
       )}

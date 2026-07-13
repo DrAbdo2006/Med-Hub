@@ -90,7 +90,11 @@ export function useMedHubStore() {
     mcqs: (mcqs || []).filter((m) => m.projectId === p.id),
   }));
   const srs = {};
-  for (const c of cards || []) srs[c.id] = toSrsEntry(c);
+  // SM-2 state map for EVERY schedulable type: cards, gaps, and MCQs each
+  // carry scheduler fields on their own table rows. (Previously only cards
+  // were mapped, so gaps/MCQs always looked brand-new to schedule() and were
+  // stuck re-doing the 10-minute learning step forever.)
+  for (const c of [...(cards || []), ...(gaps || []), ...(mcqs || [])]) srs[c.id] = toSrsEntry(c);
   const meta = Object.fromEntries((metaRows || []).map((r) => [r.key, r.value]));
 
   return {
@@ -143,10 +147,21 @@ export function useMedHubStore() {
         return r;
       },
       patchCard: async (id, changes) => {          // for app's own schedule() output
-        const r = await flashcardRepo.update(id, { ...changes, updated_at: Date.now() });
-        const c = await db.flashcards.get(id);
-        if (c) enqueueOutbox("card", id, c);
-        return r;
+        const stamped = { ...changes, updated_at: Date.now() };
+        // SM-2 state lands on whichever table OWNS the item. Card rows also
+        // mirror to the cloud outbox; gap/MCQ scheduling persists locally
+        // (they don't cloud-sync by design). Previously this wrote ONLY to
+        // db.flashcards, so gap/MCQ scheduler output silently no-oped —
+        // the "stuck at 10 minutes, never graduates" bug.
+        const n = await flashcardRepo.update(id, stamped);
+        if (n) {
+          const c = await db.flashcards.get(id);
+          if (c) enqueueOutbox("card", id, c);
+          return n;
+        }
+        const g = await gapRepo.update(id, stamped);
+        if (g) return g;
+        return db.mcqs.update(id, stamped);
       },
       reviewCard: async (id, gradeOrQuality) => {  // built-in SM-2 (quality or grade)
         const r = await flashcardRepo.review(id, gradeOrQuality);
