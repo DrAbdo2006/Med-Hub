@@ -1,0 +1,17 @@
+# Med Hub — robots.txt
+# Allow all major crawlers on the public site; keep them out of the
+# auth-gated app shell (those routes just redirect to /login for crawlers,
+# wasting crawl budget and risking soft-404 noise).
+
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /flashcards
+Disallow: /study/
+Disallow: /course
+Disallow: /lecture/
+Disallow: /profile
+Disallow: /admin
+Disallow: /login
+
+Sitemap: https://medhuub.com/sitemap.xml

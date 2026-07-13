@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- Med Hub is an SPA: only genuinely public, indexable routes belong here.
+       The app routes (/dashboard, /flashcards, /lecture/…) are auth-gated and
+       excluded — listing them would just feed crawlers redirect-to-login. -->
+  <url>
+    <loc>https://medhuub.com/</loc>
+    <lastmod>2026-07-12</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
