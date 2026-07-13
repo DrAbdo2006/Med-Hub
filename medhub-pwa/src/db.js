@@ -71,6 +71,16 @@ export const uid = () =>
 
 const nowMs = () => Date.now();
 
+// Account tag. The logged-in user's id is stamped onto every record created
+// while signed in, so the local store can attribute rows to an account
+// (defense-in-depth: logout also WIPES the store, so it never holds two
+// accounts' data at once). Set from AuthProvider's session on login/logout.
+let currentUserId = null;
+export function setCurrentUser(id) { currentUserId = id || null; }
+export function getCurrentUser() { return currentUserId; }
+// Prepend user_id so a value already on the object still wins if present.
+const stampUser = (obj) => (currentUserId ? { user_id: currentUserId, ...obj } : obj);
+
 // Fresh SM-2 state for a new card (Anki/SuperMemo defaults).
 export const freshSm2 = () => ({
   easeFactor: 2.5,
@@ -86,7 +96,7 @@ export const freshSm2 = () => ({
 export const folderRepo = {
   all: () => db.folders.toArray(),
   async create({ id = uid(), title, parentId = null, pinned = false, ...rest } = {}) {
-    const folder = { id, title, parentId, pinned, deleted: false, deletedAt: null, createdAt: nowMs(), ...rest };
+    const folder = stampUser({ id, title, parentId, pinned, deleted: false, deletedAt: null, createdAt: nowMs(), ...rest });
     await db.folders.put(folder);
     return folder;
   },
@@ -113,7 +123,7 @@ export const projectRepo = {
   all: () => db.projects.toArray(),
   byFolder: (folderId) => db.projects.where("folderId").equals(folderId).toArray(),
   async create({ id = uid(), title, folderId = null, ...rest } = {}) {
-    const project = { id, title, folderId, pinned: false, lastOpened: nowMs(), createdAt: nowMs(), ...rest };
+    const project = stampUser({ id, title, folderId, pinned: false, lastOpened: nowMs(), createdAt: nowMs(), ...rest });
     await db.projects.put(project);
     return project;
   },
@@ -134,7 +144,7 @@ export const flashcardRepo = {
   byProject: (projectId) => db.flashcards.where("projectId").equals(projectId).toArray(),
   due: (now = nowMs()) => db.flashcards.where("dueDate").belowOrEqual(now).toArray(),
   async create({ id = uid(), projectId, q, a, ...rest } = {}) {
-    const card = { id, projectId, q, a, type: "card", ...freshSm2(), createdAt: nowMs(), ...rest };
+    const card = stampUser({ id, projectId, q, a, type: "card", ...freshSm2(), createdAt: nowMs(), ...rest });
     await db.flashcards.put(card);
     return card;
   },
@@ -179,7 +189,7 @@ export const flashcardRepo = {
 export const gapRepo = {
   byProject: (projectId) => db.gaps.where("projectId").equals(projectId).toArray(),
   async create({ id = uid(), projectId, ...rest } = {}) {
-    const gap = { id, projectId, createdAt: nowMs(), ...rest };
+    const gap = stampUser({ id, projectId, createdAt: nowMs(), ...rest });
     await db.gaps.put(gap);
     return gap;
   },
@@ -191,14 +201,14 @@ export const gapRepo = {
 
 export const mcqRepo = {
   byProject: (projectId) => db.mcqs.where("projectId").equals(projectId).toArray(),
-  put: (mcq) => db.mcqs.put(mcq),
-  bulkPut: (mcqs) => db.mcqs.bulkPut(mcqs),
+  put: (mcq) => db.mcqs.put(stampUser(mcq)),
+  bulkPut: (mcqs) => db.mcqs.bulkPut(mcqs.map(stampUser)),
   remove: (id) => db.mcqs.delete(id),
 };
 
 export const occlusionRepo = {
   byProject: (projectId) => db.occlusions.where("projectId").equals(projectId).toArray(),
-  put: (occ) => db.occlusions.put(occ),
+  put: (occ) => db.occlusions.put(stampUser(occ)),
   remove: (id) => db.occlusions.delete(id),
 };
 
@@ -370,6 +380,25 @@ export async function importAll(payload) {
     await db.assets.bulkPut(assetRows);
   });
   return { folders: d.folders.length, projects: d.projects.length, flashcards: d.flashcards.length, assets: assetRows.length };
+}
+
+// Destructive: wipe ALL local data + the outbox + sync markers. Used on LOGOUT
+// for account isolation (privacy) AFTER the outbox has been flushed. Because it
+// also clears `meta` (which holds the lastSyncedAt marker + backfill flag), the
+// NEXT login starts from a clean, full pull with an empty outbox — so a
+// different user can never see the previous user's rows.
+export async function wipeAll() {
+  await db.transaction(
+    "rw",
+    db.folders, db.projects, db.flashcards, db.gaps, db.mcqs, db.occlusions, db.meta, db.assets, db.outbox,
+    async () => {
+      await Promise.all([
+        db.folders.clear(), db.projects.clear(), db.flashcards.clear(),
+        db.gaps.clear(), db.mcqs.clear(), db.occlusions.clear(),
+        db.meta.clear(), db.assets.clear(), db.outbox.clear(),
+      ]);
+    }
+  );
 }
 
 // ===========================================================================

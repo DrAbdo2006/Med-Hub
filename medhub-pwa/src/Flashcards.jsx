@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, createContext, useContext } from "react";
 import { useNavigate } from "react-router-dom";
 // Blob-based image storage (occlusion images live in IndexedDB, not localStorage)
-import { assetRepo } from "./db";
+import { assetRepo, wipeAll, setCurrentUser, downloadBackup } from "./db";
 import { supabase } from "./lib/supabaseClient";
 import { useAuth } from "./AuthProvider";
 import { useTheme } from "./ThemeProvider";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
-import { startSync, onSyncStatus, retryParked } from "./lib/sync";
+import { startSync, syncNow, onSyncStatus, retryParked, hasUnsyncedWork, flushForLogout, resetSyncState } from "./lib/sync";
 import { useAsset, useMedHubStore } from "./useMedHubStore";
 import { RATING_META, RATING_ORDER, textClass, softBgClass, borderClass, fillHex, initial } from "./ratingStyles";
 import {
@@ -48,6 +48,8 @@ import {
   Info,
   Gauge,
   RefreshCw,
+  AlertTriangle,
+  UploadCloud,
   EyeOff,
   Mail,
   Lock,
@@ -620,7 +622,33 @@ export default function App() {
   }
   // Signs out of the WHOLE platform (single identity) — ProtectedRoute then
   // redirects to /login, which is the correct single-session behavior.
-  function signOut() { platformSignOut(); setProfile((p) => ({ ...p, loggedIn: false })); }
+  // ---- Account-centric logout: FLUSH the outbox before WIPING local data ----
+  // A silent wipe would destroy unsynced work (offline edits, parked items). So:
+  //   1. no unsynced work  → wipe + sign out immediately.
+  //   2. unsynced + online → push first; if the outbox drains, wipe + sign out.
+  //   3. still dirty        → WARN (cancel / export backup / log out anyway).
+  // Wiping also clears the sync markers, so the next user starts from a clean
+  // full pull and can never see this account's rows.
+  const [logoutState, setLogoutState] = useState(null); // null | "flushing" | "warn"
+
+  async function doWipeAndSignOut() {
+    setLogoutState(null);
+    await wipeAll();            // clears all tables + outbox + lastSyncedAt marker
+    resetSyncState();          // reset in-memory engine (backoff/parked/status)
+    setCurrentUser(null);
+    await platformSignOut();
+    setProfile((p) => ({ ...p, loggedIn: false }));
+  }
+
+  async function signOut() {
+    if (!(await hasUnsyncedWork())) { await doWipeAndSignOut(); return; }
+    setLogoutState("flushing");
+    const clean = await flushForLogout();   // push, then report empty-or-not
+    if (clean) { await doWipeAndSignOut(); return; }
+    setLogoutState("warn");                 // offline / failed / parked → never wipe silently
+  }
+
+  async function exportBackup() { try { await downloadBackup(); } catch { /* surfaced by BackupControls elsewhere */ } }
 
   // On load: welcome an already-authenticated user once.
   useEffect(() => {
@@ -779,8 +807,11 @@ export default function App() {
   // Background cloud sync: pull-merge on mount, then flush the durable outbox;
   // re-verifies on `online` events. Silent — SyncBadge is the only surface.
   useEffect(() => startSync(), []);
+  // Keep the local store's account tag in sync with the logged-in user, so new
+  // records are stamped with the right user_id.
+  useEffect(() => { setCurrentUser(platformSession?.user?.id ?? null); }, [platformSession]);
 
-  const wrap = (node) => <ThemeCtx.Provider value={dark}><TopProgressBar loading={isLoading} />{node}<Toast text={toast} /><SyncBadge /></ThemeCtx.Provider>;
+  const wrap = (node) => <ThemeCtx.Provider value={dark}><TopProgressBar loading={isLoading} />{node}<Toast text={toast} /><SyncBadge /><LogoutGuard state={logoutState} onCancel={() => setLogoutState(null)} onRetry={signOut} onExport={exportBackup} onForce={doWipeAndSignOut} /></ThemeCtx.Provider>;
 
   // Async-safe gate: render a loader until the first IndexedDB read resolves.
   if (loading) return wrap(<Shell><div className="flex min-h-[40vh] items-center justify-center text-sm text-med-text">Loading your library…</div></Shell>);
@@ -1093,6 +1124,41 @@ function SyncBadge() {
   );
 }
 
+// Logout guard overlay. "flushing" = pushing the outbox before wipe; "warn" =
+// unsynced work couldn't be flushed (offline/failed/parked) — the user chooses
+// rather than losing work silently.
+function LogoutGuard({ state, onCancel, onRetry, onExport, onForce }) {
+  if (!state) return null;
+  if (state === "flushing") {
+    return (
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+        <div className="flex items-center gap-3 rounded-2xl bg-white px-5 py-4 shadow-2xl dark:bg-slate-800">
+          <RefreshCw className="h-5 w-5 animate-spin text-med-primary" />
+          <span className="text-sm font-medium text-slate-700 dark:text-slate-200">Saving your changes to the cloud…</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm" onClick={onCancel}>
+      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-800" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-3 flex items-center gap-2 text-rose-600"><AlertTriangle className="h-5 w-5" /><h3 className="text-lg font-bold">Unsynced changes</h3></div>
+        <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+          You have changes that haven't synced to the cloud (you may be offline). Logging out will <span className="font-semibold text-rose-600">permanently discard them</span> on this device. Export a backup or retry the sync first.
+        </p>
+        <div className="mt-5 flex flex-col gap-2">
+          <button onClick={onRetry} className="flex w-full items-center justify-center gap-2 rounded-xl bg-med-primary px-4 py-2.5 text-sm font-semibold text-white shadow transition hover:opacity-90 active:scale-95"><RefreshCw className="h-4 w-4" /> Retry sync</button>
+          <button onClick={onExport} className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 dark:border-white/15 dark:bg-white/5 dark:text-slate-200"><UploadCloud className="h-4 w-4" /> Export backup</button>
+          <div className="mt-1 flex gap-2">
+            <button onClick={onCancel} className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50 dark:border-white/15 dark:bg-white/5 dark:text-slate-300">Cancel</button>
+            <button onClick={onForce} className="flex-1 rounded-xl border border-rose-200 bg-white px-4 py-2.5 text-sm font-semibold text-rose-600 transition hover:bg-rose-50">Log out anyway</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Toast({ text }) {
   if (!text) return null;
   return (
@@ -1129,6 +1195,33 @@ function Shell({ children }) {
 //  • inStudy : a consistent top-left Back/Exit button (+ small label unless minimal)
 //  • minimal : Focus Study Mode — ONLY the Back/Exit button, hiding the logo/settings
 //              to give the flashcards maximum screen real-estate (progress bar follows).
+// Manual bidirectional sync trigger (push outbox → pull → LWW merge). Spins
+// while the engine reports "syncing" (any trigger — button, mount, reconnect);
+// syncNow()'s internal lock makes rapid clicks / concurrent runs no-ops.
+// Success/failure surfaces through the existing SyncBadge — no second
+// indicator. Reduced motion: static "Syncing…" label instead of the spin.
+function SyncButton() {
+  const dark = useContext(ThemeCtx);
+  const reduced = useReducedMotion();
+  const [status, setStatus] = useState("idle");
+  useEffect(() => onSyncStatus((s) => setStatus(s)), []);
+  const busy = status === "syncing";
+  return (
+    <button
+      type="button"
+      onClick={() => syncNow()}
+      disabled={busy}
+      aria-label="Sync now"
+      title="Sync now — push local changes, pull the latest from your other devices"
+      className={`flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-lg border border-med-lines px-2.5 py-2 shadow-sm transition disabled:cursor-wait ${dark ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-white text-med-text hover:bg-slate-50 hover:text-med-primary"}`}
+    >
+      {busy && reduced
+        ? <span className="text-xs font-medium">Syncing…</span>
+        : <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} aria-hidden="true" />}
+    </button>
+  );
+}
+
 function Header({ inStudy, onBack, onSettings, minimal, backLabel = "Exit" }) {
   const dark = useContext(ThemeCtx);
   // Generic / body text → med-text + Public Sans Light. Borders → med-lines.
@@ -1149,6 +1242,7 @@ function Header({ inStudy, onBack, onSettings, minimal, backLabel = "Exit" }) {
       {/* Brand wordmark → primary blue, Public Sans SemiBold */}
       <h1 className="absolute left-1/2 -translate-x-1/2 text-lg font-semibold tracking-tight text-med-primary">Med Hub</h1>
       <div className="flex gap-2">
+        <SyncButton />
         {onSettings && <button onClick={onSettings} title="Settings" className={`flex items-center justify-center rounded-lg border border-med-lines px-2.5 py-2 shadow-sm transition ${dark ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-white text-med-text hover:bg-slate-50 hover:text-med-primary"}`}><SettingsIcon className="h-4 w-4" /></button>}
       </div>
     </header>

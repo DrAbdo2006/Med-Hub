@@ -296,22 +296,36 @@ export async function retryParked() {
 }
 
 // ---- pull-merge: bring the other devices' rows in, LWW by updated_at ------
+// MERGE, never replace: each pulled row is applied only when its stamp is
+// strictly newer than the local row's. A local record with pending outbox ops
+// is newer by definition (writers stamp updated_at on every local write), so
+// unsynced local work can never be wiped by a pull. Deletes require a strict
+// boolean true — a missing/undefined `deleted` is treated as ACTIVE.
 const localStamp = (row) => row?.updated_at ?? row?.createdAt ?? 0;
+const LAST_PULL_KEY = "fcLastPulledAt";
 
 export async function pullMerge() {
   if (!(await validSession())) return;
   if (!(await verifyOnline())) return;
-  const [decksRes, cardsRes] = await Promise.all([
-    supabase.from("fc_decks").select("id, data, updated_at, deleted"),
-    supabase.from("fc_cards").select("id, data, updated_at, deleted"),
-  ]);
+
+  // INCREMENTAL: only rows changed since the last successful pull (tombstones
+  // included — they're rows too). First sync / fresh device = full pull.
+  const marker = await db.meta.get(LAST_PULL_KEY).catch(() => null);
+  const since = marker?.value || null;
+  let decksQ = supabase.from("fc_decks").select("id, data, updated_at, deleted");
+  let cardsQ = supabase.from("fc_cards").select("id, data, updated_at, deleted");
+  if (since) { decksQ = decksQ.gt("updated_at", since); cardsQ = cardsQ.gt("updated_at", since); }
+  const [decksRes, cardsRes] = await Promise.all([decksQ, cardsQ]);
   if (decksRes.error || cardsRes.error) return;    // stay silent; retry later
+
+  let maxStamp = 0;
+  const seen = (iso) => { const t = Date.parse(iso); if (t > maxStamp) maxStamp = t; return t; };
 
   await db.transaction("rw", db.projects, db.flashcards, async () => {
     for (const r of decksRes.data || []) {
-      const remoteAt = Date.parse(r.updated_at);
+      const remoteAt = seen(r.updated_at);
       const local = await db.projects.get(r.id);
-      if (r.deleted) {
+      if (r.deleted === true) {
         if (local && localStamp(local) <= remoteAt) {
           await db.flashcards.where("projectId").equals(r.id).delete();
           await db.projects.delete(r.id);
@@ -321,9 +335,9 @@ export async function pullMerge() {
       }
     }
     for (const r of cardsRes.data || []) {
-      const remoteAt = Date.parse(r.updated_at);
+      const remoteAt = seen(r.updated_at);
       const local = await db.flashcards.get(r.id);
-      if (r.deleted) {
+      if (r.deleted === true) {
         if (local && localStamp(local) <= remoteAt) await db.flashcards.delete(r.id);
       } else if (!local || localStamp(local) < remoteAt) {
         // Keep a local-only oversized image if the cloud snapshot lacks one.
@@ -332,6 +346,60 @@ export async function pullMerge() {
       }
     }
   });
+
+  // Advance the marker to the newest SERVER stamp we saw (not local clock —
+  // clock-skew resistant). No rows → marker stays put.
+  if (maxStamp > 0) {
+    await db.meta.put({ key: LAST_PULL_KEY, value: new Date(maxStamp).toISOString() }).catch(() => {});
+  }
+}
+
+// ---- manual/bidirectional sync: PUSH FIRST, then pull ----------------------
+// Order matters: flushing the outbox before pulling means local unsynced work
+// reaches the server before any merge decisions; a pull can then never see a
+// "newer" stale server row for something the user just edited offline.
+// `syncingNow` is the concurrency lock — mount + button + online-event can't
+// run two overlapping cycles.
+let syncingNow = false;
+export async function syncNow() {
+  if (syncingNow) return false;
+  syncingNow = true;
+  try {
+    setStatus("syncing");
+    await flushOutbox();     // 1. PUSH local changes
+    await pullMerge();       // 2. PULL + LWW-merge (live queries rehydrate UI)
+    // flushOutbox already settled status (idle / retrying / error / offline).
+    return true;
+  } finally {
+    syncingNow = false;
+  }
+}
+
+// ---- logout safety: flush before wiping ------------------------------------
+// True when the outbox holds ANY pending op (including parked/poison items) —
+// i.e. there is unsynced local work that a wipe would destroy.
+export async function hasUnsyncedWork() {
+  try { return (await db.outbox.count()) > 0; } catch { return false; }
+}
+
+// Best-effort push for logout. Runs a normal push (session-validated,
+// connectivity-checked) and reports whether the outbox is EMPTY afterward.
+// Returns false if anything remains (offline, failed, or parked) so the caller
+// can WARN instead of silently wiping unsynced changes.
+export async function flushForLogout() {
+  try { await flushOutbox(); } catch { /* fall through to the count check */ }
+  return (await db.outbox.count().catch(() => 1)) === 0;
+}
+
+// Reset the in-memory engine state after a wipe so the next user starts clean
+// (no carried-over backoff / parked count / status). Persisted markers are
+// cleared by wipeAll() clearing the `meta` table.
+export function resetSyncState() {
+  backoff = BACKOFF_MIN;
+  clearTimeout(timer);
+  started = false;
+  setParked(0);
+  setStatus("idle");
 }
 
 // One-time backfill: data created BEFORE this engine existed has no outbox
@@ -351,11 +419,12 @@ export function startSync() {
   started = true;
   const onOnline = () => { backoff = BACKOFF_MIN; scheduleFlush(500); };
   window.addEventListener("online", onOnline);
-  // Initial pass: merge remote state in, backfill pre-engine data, then push.
+  // Initial pass — PUSH FIRST, then pull (same rule as syncNow): backfill
+  // enqueues any pre-engine data, the flush ships everything local, and only
+  // then do we merge remote rows in. Non-blocking: runs behind first paint.
   (async () => {
-    await pullMerge();
     await backfillOnce();
-    flushOutbox();
+    await syncNow();
   })();
   return () => {
     window.removeEventListener("online", onOnline);
