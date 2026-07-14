@@ -38,6 +38,20 @@ const MAX_IMAGE_BYTES = 512 * 1024;
 // single permanently-bad row can't pin the whole queue in "retrying" forever.
 const MAX_RETRIES = 5;
 
+// Entity → sync target: which RPC pushes it, which server table pulls it, and
+// which local Dexie table it merges into. Push and merge follow SYNC_ORDER, so
+// parents (folders → decks) always land before children (cards/gaps/mcqs/images).
+const ENTITY = {
+  folder: { rpc: "fc_upsert_folder", table: "fc_folders", local: () => db.folders },
+  deck:   { rpc: "fc_upsert_deck",   table: "fc_decks",   local: () => db.projects },
+  card:   { rpc: "fc_upsert_card",   table: "fc_cards",   local: () => db.flashcards },
+  gap:    { rpc: "fc_upsert_gap",    table: "fc_gaps",    local: () => db.gaps },
+  mcq:    { rpc: "fc_upsert_mcq",    table: "fc_mcqs",    local: () => db.mcqs },
+  image:  { rpc: "fc_upsert_image",  table: "fc_images",  local: () => db.occlusions },
+};
+const SYNC_ORDER = ["folder", "deck", "card", "gap", "mcq", "image"];
+const orderIndex = (e) => { const i = SYNC_ORDER.indexOf(e); return i === -1 ? 99 : i; };
+
 let backoff = BACKOFF_MIN;
 let flushing = false;
 let timer = null;
@@ -185,7 +199,12 @@ export async function flushOutbox() {
     // Parked (poison) items are excluded from the active working set so they
     // never block healthy rows — but they still count toward the error state.
     const parkedCount = all.filter((it) => it.parked).length;
-    const items = all.filter((it) => !it.parked);
+    // STRICT RELATIONAL PUSH ORDER: folders → decks → cards/gaps/mcqs/images, so
+    // a parent row always reaches the server before its children. Ties break by
+    // enqueue time (FIFO).
+    const items = all
+      .filter((it) => !it.parked)
+      .sort((a, b) => (orderIndex(a.entity) - orderIndex(b.entity)) || ((a.queuedAt || 0) - (b.queuedAt || 0)));
 
     setParked(parkedCount);   // keep the "N failed" count in sync with the store
 
@@ -215,15 +234,14 @@ export async function flushOutbox() {
       try {
         // Idempotent by client UUID (upsert key) + server LWW guard, so a
         // retry that already landed is a safe no-op — never a duplicate row.
-        const { error, status: httpStatus } = await supabase.rpc(
-          it.entity === "deck" ? "fc_upsert_deck" : "fc_upsert_card",
-          {
-            _id: String(it.entityId),
-            _data: it.payload ?? {},
-            _updated_at: new Date(it.updated_at).toISOString(),
-            _deleted: !!it.deleted,
-          }
-        );
+        const rpc = ENTITY[it.entity]?.rpc;
+        if (!rpc) throw Object.assign(new Error(`unknown sync entity "${it.entity}"`), { code: "PGRST_UNKNOWN_ENTITY" });
+        const { error, status: httpStatus } = await supabase.rpc(rpc, {
+          _id: String(it.entityId),
+          _data: it.payload ?? {},
+          _updated_at: new Date(it.updated_at).toISOString(),
+          _deleted: !!it.deleted,
+        });
         if (error) {
           // Carry the HTTP status into the error so the classifier/logger
           // can distinguish auth (401/403) from server (5xx) failures.
@@ -317,17 +335,22 @@ export async function pullMerge() {
   // it server-side, but it documents intent and trims the payload.
   const marker = await db.meta.get(LAST_PULL_KEY).catch(() => null);
   const since = marker?.value || null;
-  let decksQ = supabase.from("fc_decks").select("id, data, updated_at, deleted").eq("user_id", uid);
-  let cardsQ = supabase.from("fc_cards").select("id, data, updated_at, deleted").eq("user_id", uid);
-  if (since) { decksQ = decksQ.gt("updated_at", since); cardsQ = cardsQ.gt("updated_at", since); }
-  const [decksRes, cardsRes] = await Promise.all([decksQ, cardsQ]);
-  if (decksRes.error || cardsRes.error) {
-    const e = decksRes.error || cardsRes.error;
-    console.error(`[SYNC] ERROR: pull failed — code: ${e?.code ?? "(none)"} message: ${e?.message ?? e} details: ${e?.details ?? "(none)"}`, e);
+
+  // Fetch ALL SIX tables for this user (incremental after the first pull). The
+  // .eq("user_id") filter is for clarity/efficiency; RLS is the real boundary.
+  const res = {};
+  await Promise.all(SYNC_ORDER.map(async (e) => {
+    let q = supabase.from(ENTITY[e].table).select("id, data, updated_at, deleted").eq("user_id", uid);
+    if (since) q = q.gt("updated_at", since);
+    res[e] = await q;
+  }));
+  const firstErr = SYNC_ORDER.map((e) => res[e].error).find(Boolean);
+  if (firstErr) {
+    console.error(`[SYNC] ERROR: pull failed — code: ${firstErr?.code ?? "(none)"} message: ${firstErr?.message ?? firstErr} details: ${firstErr?.details ?? "(none)"}`, firstErr);
     setStatus("error");
     return;
   }
-  console.log(`[SYNC] 4. Pulled records: decks=${decksRes.data?.length || 0}, cards=${cardsRes.data?.length || 0}`);
+  console.log(`[SYNC] 4. Pulled records: ${SYNC_ORDER.map((e) => `${e}=${res[e].data?.length || 0}`).join(", ")}`);
 
   // NEVER clobber unsynced local work: any id with a pending outbox op is
   // treated as locally-newer regardless of timestamp. This also shields offline
@@ -343,70 +366,55 @@ export async function pullMerge() {
   const seen = (iso) => { const t = toUtc(iso); if (t > maxStamp) maxStamp = t; return t; };
   const orphans = [];
 
+  // Generic per-row merge: strict LWW + pending-outbox protection + strict
+  // tombstones. `hydrate` keeps local-only fields (e.g. an oversized card image
+  // the cloud snapshot dropped); `parentOf` flags orphans; `cascade` removes a
+  // deleted parent's descendants.
+  async function mergeRows(rows, table, { hydrate, parentOf, cascade } = {}) {
+    for (const r of rows || []) {
+      const remoteAt = seen(r.updated_at);
+      if (pending.has(r.id)) continue;                 // never clobber unsynced local work
+      const local = await table.get(r.id);
+      if (r.deleted === true) {                         // strict: only true is a delete
+        if (local && localStamp(local) <= remoteAt) {
+          if (cascade) await cascade(r.id);
+          await table.delete(r.id);
+        }
+      } else if (!local || localStamp(local) < remoteAt) {
+        if (parentOf) { const miss = await parentOf(r.data); if (miss) orphans.push(miss); }
+        const data = hydrate ? hydrate(local, r.data) : r.data;
+        await table.put({ ...data, id: r.id, updated_at: remoteAt });
+      }
+    }
+  }
+
   // ONE transaction, STRICT HIERARCHICAL ORDER (parents before children) so a
   // child row never lands while its parent is still missing — that transient
   // "parent doesn't exist yet" window is exactly what dumped projects into
   // "Unfiled". Order: Folders → Projects → Cards/Gaps/MCQs/Images.
-  await db.transaction("rw", db.projects, db.flashcards, db.gaps, db.mcqs, db.occlusions, async () => {
-    // ── 1. FILES (folders): no server table yet (only fc_decks/fc_cards exist),
-    //       so nothing to merge here today. When fc_folders is added, merge it
-    //       FIRST — before projects — so every project's folderId resolves and
-    //       the "Unfiled" glitch cannot occur.
-
-    // ── 2. PROJECTS (decks) — persisted before cards so projectId resolves.
-    for (const r of decksRes.data || []) {
-      const remoteAt = seen(r.updated_at);
-      if (pending.has(r.id)) continue;                 // unsynced local edit wins
-      const local = await db.projects.get(r.id);
-      if (r.deleted === true) {                         // strict: only true deletes
-        if (local && localStamp(local) <= remoteAt) {
-          // CASCADE: a tombstoned project takes ALL its children with it locally,
-          // so no ghost cards/gaps/mcqs/images linger under a deleted parent.
-          await Promise.all([
-            db.flashcards.where("projectId").equals(r.id).delete(),
-            db.gaps.where("projectId").equals(r.id).delete(),
-            db.mcqs.where("projectId").equals(r.id).delete(),
-            db.occlusions.where("projectId").equals(r.id).delete(),
-          ]);
-          await db.projects.delete(r.id);
-        }
-      } else if (!local || localStamp(local) < remoteAt) {
-        await db.projects.put({ ...r.data, id: r.id, updated_at: remoteAt });
-      }
-    }
-
-    // ── 3. CARDS — projectId now resolves against the projects merged above.
-    for (const r of cardsRes.data || []) {
-      const remoteAt = seen(r.updated_at);
-      if (pending.has(r.id)) continue;
-      const local = await db.flashcards.get(r.id);
-      if (r.deleted === true) {
-        if (local && localStamp(local) <= remoteAt) await db.flashcards.delete(r.id);
-      } else if (!local || localStamp(local) < remoteAt) {
-        // Orphan guard: parent project exists NOWHERE (not pulled, not local).
-        // Quarantine (still store, but flag) instead of silently surfacing it.
-        if (r.data.projectId && !(await db.projects.get(r.data.projectId))) {
-          orphans.push({ type: "card", id: r.id, projectId: r.data.projectId });
-        }
-        const image = r.data.image ?? local?.image ?? null;   // keep local-only oversized image
-        await db.flashcards.put({ ...r.data, image, id: r.id, updated_at: remoteAt });
-      }
-    }
-    // ── 4. GAPS / MCQs / IMAGES — no server tables yet; merged HERE, after
-    //       their project, once those tables exist (same LWW + orphan rules).
+  await db.transaction("rw", db.folders, db.projects, db.flashcards, db.gaps, db.mcqs, db.occlusions, async () => {
+    // 1. FILES (folders) — merged first so every project's folderId resolves.
+    await mergeRows(res.folder.data, db.folders);
+    // 2. PROJECTS (decks) — a tombstoned project cascades to ALL its children
+    //    locally, so no ghost cards/gaps/mcqs/images linger under it.
+    await mergeRows(res.deck.data, db.projects, {
+      parentOf: async (d) => (d.folderId && !(await db.folders.get(d.folderId)) ? { type: "project", id: d.id, folderId: d.folderId } : null),
+      cascade: async (pid) => { await Promise.all([
+        db.flashcards.where("projectId").equals(pid).delete(),
+        db.gaps.where("projectId").equals(pid).delete(),
+        db.mcqs.where("projectId").equals(pid).delete(),
+        db.occlusions.where("projectId").equals(pid).delete(),
+      ]); },
+    });
+    // 3. CARDS / GAPS / MCQs / IMAGES — projectId now resolves.
+    const childParent = async (d) => (d.projectId && !(await db.projects.get(d.projectId)) ? { type: "child", id: d.id, projectId: d.projectId } : null);
+    await mergeRows(res.card.data, db.flashcards, { parentOf: childParent, hydrate: (local, d) => ({ ...d, image: d.image ?? local?.image ?? null }) });
+    await mergeRows(res.gap.data, db.gaps, { parentOf: childParent });
+    await mergeRows(res.mcq.data, db.mcqs, { parentOf: childParent });
+    await mergeRows(res.image.data, db.occlusions, { parentOf: childParent });
   });
 
-  // Projects whose parent FILE isn't present locally: keep them LINKED (so they
-  // slot in when the File later syncs) — do NOT force them into "Unfiled". Just
-  // log for recovery visibility.
-  const unresolvedFiles = [];
-  for (const r of decksRes.data || []) {
-    if (r.deleted === true) continue;
-    const fid = r.data?.folderId;
-    if (fid && !(await db.folders.get(fid))) unresolvedFiles.push({ project: r.id, folderId: fid });
-  }
-  if (unresolvedFiles.length) console.warn(`[SYNC] ${unresolvedFiles.length} project(s) reference a File not present locally — kept linked (not moved to Unfiled):`, unresolvedFiles);
-  if (orphans.length) console.warn(`[SYNC] ${orphans.length} orphaned child record(s) quarantined (parent project missing on server + local):`, orphans);
+  if (orphans.length) console.warn(`[SYNC] ${orphans.length} record(s) reference a missing parent — kept linked / quarantined (not silently moved to Unfiled):`, orphans);
 
   // Advance the marker to the newest SERVER stamp we saw. No rows → stays put.
   if (maxStamp > 0) {
@@ -478,12 +486,23 @@ export function resetSyncState() {
 // One-time backfill: data created BEFORE this engine existed has no outbox
 // rows. Enqueue everything once (LWW server guard makes it collision-safe).
 async function backfillOnce() {
-  const flag = await db.meta.get("fcSyncBackfillDone");
+  // Bump the flag key so devices that backfilled under the deck/card-only engine
+  // re-run and now also ship folders/gaps/mcqs/images.
+  const flag = await db.meta.get("fcSyncBackfillDone_v2");
   if (flag?.value) return;
-  const [projects, cards] = await Promise.all([db.projects.toArray(), db.flashcards.toArray()]);
+  const [folders, projects, cards, gaps, mcqs, occ] = await Promise.all([
+    db.folders.toArray(), db.projects.toArray(), db.flashcards.toArray(),
+    db.gaps.toArray(), db.mcqs.toArray(), db.occlusions.toArray(),
+  ]);
+  // Enqueue in relational order (the flush re-sorts anyway, but this keeps the
+  // outbox tidy): folders → decks → cards/gaps/mcqs/images.
+  for (const f of folders) await enqueueOutbox("folder", f.id, f);
   for (const p of projects) await enqueueOutbox("deck", p.id, p);
   for (const c of cards) await enqueueOutbox("card", c.id, c);
-  await db.meta.put({ key: "fcSyncBackfillDone", value: true });
+  for (const g of gaps) await enqueueOutbox("gap", g.id, g);
+  for (const m of mcqs) await enqueueOutbox("mcq", m.id, m);
+  for (const o of occ) await enqueueOutbox("image", o.id, o);
+  await db.meta.put({ key: "fcSyncBackfillDone_v2", value: true });
 }
 
 // ---- lifecycle -------------------------------------------------------------

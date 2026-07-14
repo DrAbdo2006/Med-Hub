@@ -105,13 +105,46 @@ export function useMedHubStore() {
     srs,
     meta,
     writers: {
-      // folders
-      createFolder: (args) => folderRepo.create(args),
-      patchFolder: folderRepo.update,
-      softDeleteFolder: folderRepo.softDelete,
-      restoreFolder: folderRepo.restore,
-      purgeFolder: folderRepo.purge,
-      hardDeleteFolder: folderRepo.purge,   // permanent cascade delete (alias)
+      // folders (Files) — now cloud-synced. Soft-delete/restore ride in `data`
+      // (data.deleted flag) as normal upserts; only PURGE emits sync tombstones.
+      createFolder: async (args) => {
+        const f = await folderRepo.create({ ...args, updated_at: Date.now() });
+        enqueueOutbox("folder", f.id, f);
+        return f;
+      },
+      patchFolder: async (id, changes) => {
+        const r = await folderRepo.update(id, { ...changes, updated_at: Date.now() });
+        const f = await db.folders.get(id);
+        if (f) enqueueOutbox("folder", id, f);
+        return r;
+      },
+      softDeleteFolder: async (id) => {
+        await folderRepo.softDelete(id);
+        await db.folders.update(id, { updated_at: Date.now() });
+        const f = await db.folders.get(id);
+        if (f) enqueueOutbox("folder", id, f);   // trash state syncs via data
+      },
+      restoreFolder: async (id) => {
+        await folderRepo.restore(id);
+        await db.folders.update(id, { updated_at: Date.now() });
+        const f = await db.folders.get(id);
+        if (f) enqueueOutbox("folder", id, f);
+      },
+      // Permanent cascade: tombstone the folder AND its projects. Pull-merge's
+      // project-tombstone cascade then drops each project's cards/gaps/mcqs/
+      // images on every device — no ghost descendants.
+      purgeFolder: async (id) => {
+        const projIds = (await db.projects.where("folderId").equals(id).toArray()).map((p) => p.id);
+        await folderRepo.purge(id);
+        for (const pid of projIds) enqueueOutbox("deck", pid, null, true);
+        enqueueOutbox("folder", id, null, true);
+      },
+      hardDeleteFolder: async (id) => {   // alias of purgeFolder (same cascade + tombstones)
+        const projIds = (await db.projects.where("folderId").equals(id).toArray()).map((p) => p.id);
+        await folderRepo.purge(id);
+        for (const pid of projIds) enqueueOutbox("deck", pid, null, true);
+        enqueueOutbox("folder", id, null, true);
+      },
       // projects (decks) — LOCAL-FIRST + durable outbox. The IndexedDB write
       // happens first (UI reacts instantly, offline included); the outbox
       // enqueue mirrors the row to Supabase in the background (lib/sync.js).
@@ -160,8 +193,10 @@ export function useMedHubStore() {
           return n;
         }
         const g = await gapRepo.update(id, stamped);
-        if (g) return g;
-        return db.mcqs.update(id, stamped);
+        if (g) { const row = await db.gaps.get(id); if (row) enqueueOutbox("gap", id, row); return g; }
+        const m = await db.mcqs.update(id, stamped);
+        if (m) { const row = await db.mcqs.get(id); if (row) enqueueOutbox("mcq", id, row); }
+        return m;
       },
       reviewCard: async (id, gradeOrQuality) => {  // built-in SM-2 (quality or grade)
         const r = await flashcardRepo.review(id, gradeOrQuality);
@@ -180,16 +215,45 @@ export function useMedHubStore() {
         for (const c of cards) enqueueOutbox("card", c.id, c);
         return r;
       },
-      // gaps / mcqs / occlusions
-      createGap: (projectId, gap) => gapRepo.create({ projectId, ...gap }),
-      patchGap: gapRepo.update,
-      bulkPutGaps: (projectId, list) => gapRepo.bulkPut(list.map((g) => ({ ...g, id: g.id || uid(), projectId }))),
-      deleteGap: gapRepo.remove,
-      putMcq: (projectId, mcq) => mcqRepo.put({ ...mcq, id: mcq.id || uid(), projectId }),
-      bulkPutMcqs: (projectId, list) => mcqRepo.bulkPut(list.map((m) => ({ ...m, id: m.id || uid(), projectId }))),
-      deleteMcq: mcqRepo.remove,
-      putOcclusion: (projectId, occ) => occlusionRepo.put({ projectId, ...occ }),
-      deleteOcclusion: occlusionRepo.remove,
+      // gaps / mcqs / occlusions — now cloud-synced (stamp updated_at + enqueue).
+      createGap: async (projectId, gap) => {
+        const g = await gapRepo.create({ projectId, ...gap, updated_at: Date.now() });
+        enqueueOutbox("gap", g.id, g);
+        return g;
+      },
+      patchGap: async (id, changes) => {
+        const r = await gapRepo.update(id, { ...changes, updated_at: Date.now() });
+        const g = await db.gaps.get(id);
+        if (g) enqueueOutbox("gap", id, g);
+        return r;
+      },
+      bulkPutGaps: async (projectId, list) => {
+        const gaps = list.map((g) => ({ ...g, id: g.id || uid(), projectId, updated_at: Date.now() }));
+        const r = await gapRepo.bulkPut(gaps);
+        for (const g of gaps) enqueueOutbox("gap", g.id, g);
+        return r;
+      },
+      deleteGap: async (id) => { await gapRepo.remove(id); enqueueOutbox("gap", id, null, true); },
+      putMcq: async (projectId, mcq) => {
+        const m = { ...mcq, id: mcq.id || uid(), projectId, updated_at: Date.now() };
+        const r = await mcqRepo.put(m);
+        enqueueOutbox("mcq", m.id, m);
+        return r;
+      },
+      bulkPutMcqs: async (projectId, list) => {
+        const mcqs = list.map((m) => ({ ...m, id: m.id || uid(), projectId, updated_at: Date.now() }));
+        const r = await mcqRepo.bulkPut(mcqs);
+        for (const m of mcqs) enqueueOutbox("mcq", m.id, m);
+        return r;
+      },
+      deleteMcq: async (id) => { await mcqRepo.remove(id); enqueueOutbox("mcq", id, null, true); },
+      putOcclusion: async (projectId, occ) => {
+        const o = { projectId, ...occ, id: occ.id || uid(), updated_at: Date.now() };
+        const r = await occlusionRepo.put(o);
+        enqueueOutbox("image", o.id, o);
+        return r;
+      },
+      deleteOcclusion: async (id) => { await occlusionRepo.remove(id); enqueueOutbox("image", id, null, true); },
       // image assets (Blobs) — store a File, get back an assetId string
       putImage: (file) => assetRepo.putFile(file),
       removeImage: (assetId) => assetRepo.remove(assetId),
