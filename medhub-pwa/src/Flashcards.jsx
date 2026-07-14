@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, createContext, useContext } from "react";
+import { useState, useRef, useEffect, useCallback, useLayoutEffect, createContext, useContext } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 // Blob-based image storage (occlusion images live in IndexedDB, not localStorage)
 import { assetRepo, wipeAll, setCurrentUser, downloadBackup } from "./db";
@@ -1347,26 +1348,115 @@ function InlineDesc({ value, onSave, placeholder = "Add a description…", class
   if (editing) return <input autoFocus value={v} onChange={(e) => setV(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }} placeholder={placeholder} className={`w-full max-w-lg rounded-md border border-indigo-300 bg-white px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-indigo-100 ${className}`} />;
   return <button onClick={() => setEditing(true)} className={`text-left text-sm decoration-dotted decoration-slate-300 underline-offset-4 hover:underline ${value ? "text-slate-500" : "text-slate-400"} ${className}`}>{value || placeholder}</button>;
 }
-// Clean dropdown menu (settings icon → overlay of actions). Closes on outside click.
+// Dropdown menu (settings icon → actions). The content is rendered in a PORTAL
+// to document.body so it ESCAPES the file accordion's `overflow-hidden` (which
+// must stay, or the spring open/close animation spills). Portaling loses
+// relative positioning, so we compute fixed coords from the trigger's rect,
+// auto-flip up when there's no room below, keep it on-screen horizontally,
+// scroll internally past max-height, and reposition on scroll/resize.
+const MENU_W = 192; // w-48
 function Menu({ items, align = "right" }) {
   const dark = useContext(ThemeCtx);
   const [open, setOpen] = useState(false);
+  const [coords, setCoords] = useState(null);   // { top, left, maxH }
+  const btnRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const place = useCallback(() => {
+    const b = btnRef.current?.getBoundingClientRect();
+    if (!b) return;
+    const vw = window.innerWidth, vh = window.innerHeight, gap = 6;
+    const maxH = Math.floor(vh * 0.5);                         // max-h-[50vh]
+    const measured = menuRef.current?.offsetHeight || 0;
+    const estH = Math.min(measured || items.length * 44 + 8, maxH);
+    const spaceBelow = vh - b.bottom;
+    // AUTO-FLIP: open upward when there isn't room below and there's more above.
+    const openUp = spaceBelow < estH + gap && b.top > spaceBelow;
+    const top = openUp
+      ? Math.max(gap, b.top - gap - estH)
+      : Math.min(b.bottom + gap, vh - gap - estH);
+    // Horizontal: align to the button edge, then SHIFT to stay fully on-screen.
+    let left = align === "right" ? b.right - MENU_W : b.left;
+    left = Math.max(gap, Math.min(left, vw - MENU_W - gap));
+    setCoords({ top, left, maxH });
+  }, [align, items.length]);
+
+  // Position on open + keep it attached on scroll/resize (capture=true catches
+  // scrolls in nested containers, e.g. the accordion body).
+  useLayoutEffect(() => {
+    if (!open) return;
+    place();
+    const raf = requestAnimationFrame(place);   // re-place with the REAL height
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => { cancelAnimationFrame(raf); window.removeEventListener("scroll", place, true); window.removeEventListener("resize", place); };
+  }, [open, place]);
+
+  // Outside-click (PORTAL-AWARE: the menu lives outside the card DOM, so we test
+  // against the menu + trigger refs, not DOM containment in the card) + Esc.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => {
+      if (menuRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === "Escape") { setOpen(false); btnRef.current?.focus(); } };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown, true); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+
+  // Move focus into the menu when it opens (keyboard users land on item 1).
+  useEffect(() => {
+    if (open && coords) menuRef.current?.querySelector("[role=menuitem]")?.focus();
+  }, [open, coords]);
+
+  const closeAndFocus = () => { setOpen(false); btnRef.current?.focus(); };
+  function onMenuKey(e) {
+    const nodes = [...(menuRef.current?.querySelectorAll("[role=menuitem]") || [])];
+    const i = nodes.indexOf(document.activeElement);
+    if (e.key === "ArrowDown") { e.preventDefault(); nodes[(i + 1) % nodes.length]?.focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); nodes[(i - 1 + nodes.length) % nodes.length]?.focus(); }
+    else if (e.key === "Home") { e.preventDefault(); nodes[0]?.focus(); }
+    else if (e.key === "End") { e.preventDefault(); nodes[nodes.length - 1]?.focus(); }
+  }
+
   return (
-    <div className="relative">
-      <button onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }} title="Options" className={`flex items-center justify-center rounded-lg border p-1.5 transition ${dark ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900"}`}><SettingsIcon className="h-4 w-4" /></button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setOpen(false); }} />
-          <div onClick={(e) => e.stopPropagation()} className={`absolute z-50 mt-1 w-48 overflow-hidden rounded-xl border py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"} ${dark ? "border-slate-600 bg-slate-800" : "border-slate-200 bg-white"}`}>
-            {items.map((it, i) => (
-              <button key={i} onClick={() => { setOpen(false); it.onClick(); }} className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition ${it.danger ? "text-rose-600 hover:bg-rose-50" : dark ? "text-slate-200 hover:bg-slate-700" : "text-slate-700 hover:bg-slate-50"}`}>
-                {it.icon && <it.icon className="h-4 w-4" />} {it.label}
-              </button>
-            ))}
-          </div>
-        </>
+    <>
+      <button
+        ref={btnRef}
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        title="Options"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={`flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg border p-1.5 transition ${dark ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900"}`}
+      >
+        <SettingsIcon className="h-4 w-4" />
+      </button>
+      {open && coords && createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={onMenuKey}
+          style={{ position: "fixed", top: coords.top, left: coords.left, width: MENU_W, maxHeight: coords.maxH }}
+          className={`z-[100] overflow-y-auto overscroll-contain rounded-xl border py-1 shadow-xl ${dark ? "border-slate-600 bg-slate-800" : "border-slate-200 bg-white"}`}
+        >
+          {items.map((it, i) => (
+            <button
+              key={i}
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => { closeAndFocus(); it.onClick(); }}
+              className={`flex w-full min-h-[44px] items-center gap-2 px-3 py-2 text-left text-sm outline-none transition focus:ring-2 focus:ring-inset focus:ring-med-primary ${it.danger ? "text-rose-600 hover:bg-rose-50 focus:bg-rose-50" : dark ? "text-slate-200 hover:bg-slate-700 focus:bg-slate-700" : "text-slate-700 hover:bg-slate-50 focus:bg-slate-50"}`}
+            >
+              {it.icon && <it.icon className="h-4 w-4 shrink-0" />} {it.label}
+            </button>
+          ))}
+        </div>,
+        document.body
       )}
-    </div>
+    </>
   );
 }
 // Textarea that grows to fit its content (no inner scrollbar).
