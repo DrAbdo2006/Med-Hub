@@ -329,40 +329,92 @@ export async function pullMerge() {
   }
   console.log(`[SYNC] 4. Pulled records: decks=${decksRes.data?.length || 0}, cards=${cardsRes.data?.length || 0}`);
 
-  let maxStamp = 0;
-  const seen = (iso) => { const t = Date.parse(iso); if (t > maxStamp) maxStamp = t; return t; };
+  // NEVER clobber unsynced local work: any id with a pending outbox op is
+  // treated as locally-newer regardless of timestamp. This also shields offline
+  // edits from clock-skew (a stale server row with a "newer" clock can't win).
+  const pending = new Set((await db.outbox.toArray().catch(() => [])).map((o) => o.entityId));
 
-  await db.transaction("rw", db.projects, db.flashcards, async () => {
+  // UTC normalization: Date.parse on an ISO-8601 string is spec'd as UTC, so
+  // there is no local-timezone drift. NOTE: this `updated_at` is CLIENT-set (the
+  // RPC stores the caller's _updated_at; the DB does not override it), so LWW
+  // trusts device clocks — see the clock-skew caveat in the summary.
+  const toUtc = (iso) => Date.parse(iso) || 0;
+  let maxStamp = 0;
+  const seen = (iso) => { const t = toUtc(iso); if (t > maxStamp) maxStamp = t; return t; };
+  const orphans = [];
+
+  // ONE transaction, STRICT HIERARCHICAL ORDER (parents before children) so a
+  // child row never lands while its parent is still missing — that transient
+  // "parent doesn't exist yet" window is exactly what dumped projects into
+  // "Unfiled". Order: Folders → Projects → Cards/Gaps/MCQs/Images.
+  await db.transaction("rw", db.projects, db.flashcards, db.gaps, db.mcqs, db.occlusions, async () => {
+    // ── 1. FILES (folders): no server table yet (only fc_decks/fc_cards exist),
+    //       so nothing to merge here today. When fc_folders is added, merge it
+    //       FIRST — before projects — so every project's folderId resolves and
+    //       the "Unfiled" glitch cannot occur.
+
+    // ── 2. PROJECTS (decks) — persisted before cards so projectId resolves.
     for (const r of decksRes.data || []) {
       const remoteAt = seen(r.updated_at);
+      if (pending.has(r.id)) continue;                 // unsynced local edit wins
       const local = await db.projects.get(r.id);
-      if (r.deleted === true) {
+      if (r.deleted === true) {                         // strict: only true deletes
         if (local && localStamp(local) <= remoteAt) {
-          await db.flashcards.where("projectId").equals(r.id).delete();
+          // CASCADE: a tombstoned project takes ALL its children with it locally,
+          // so no ghost cards/gaps/mcqs/images linger under a deleted parent.
+          await Promise.all([
+            db.flashcards.where("projectId").equals(r.id).delete(),
+            db.gaps.where("projectId").equals(r.id).delete(),
+            db.mcqs.where("projectId").equals(r.id).delete(),
+            db.occlusions.where("projectId").equals(r.id).delete(),
+          ]);
           await db.projects.delete(r.id);
         }
       } else if (!local || localStamp(local) < remoteAt) {
         await db.projects.put({ ...r.data, id: r.id, updated_at: remoteAt });
       }
     }
+
+    // ── 3. CARDS — projectId now resolves against the projects merged above.
     for (const r of cardsRes.data || []) {
       const remoteAt = seen(r.updated_at);
+      if (pending.has(r.id)) continue;
       const local = await db.flashcards.get(r.id);
       if (r.deleted === true) {
         if (local && localStamp(local) <= remoteAt) await db.flashcards.delete(r.id);
       } else if (!local || localStamp(local) < remoteAt) {
-        // Keep a local-only oversized image if the cloud snapshot lacks one.
-        const image = r.data.image ?? local?.image ?? null;
+        // Orphan guard: parent project exists NOWHERE (not pulled, not local).
+        // Quarantine (still store, but flag) instead of silently surfacing it.
+        if (r.data.projectId && !(await db.projects.get(r.data.projectId))) {
+          orphans.push({ type: "card", id: r.id, projectId: r.data.projectId });
+        }
+        const image = r.data.image ?? local?.image ?? null;   // keep local-only oversized image
         await db.flashcards.put({ ...r.data, image, id: r.id, updated_at: remoteAt });
       }
     }
+    // ── 4. GAPS / MCQs / IMAGES — no server tables yet; merged HERE, after
+    //       their project, once those tables exist (same LWW + orphan rules).
   });
 
-  // Advance the marker to the newest SERVER stamp we saw (not local clock —
-  // clock-skew resistant). No rows → marker stays put.
+  // Projects whose parent FILE isn't present locally: keep them LINKED (so they
+  // slot in when the File later syncs) — do NOT force them into "Unfiled". Just
+  // log for recovery visibility.
+  const unresolvedFiles = [];
+  for (const r of decksRes.data || []) {
+    if (r.deleted === true) continue;
+    const fid = r.data?.folderId;
+    if (fid && !(await db.folders.get(fid))) unresolvedFiles.push({ project: r.id, folderId: fid });
+  }
+  if (unresolvedFiles.length) console.warn(`[SYNC] ${unresolvedFiles.length} project(s) reference a File not present locally — kept linked (not moved to Unfiled):`, unresolvedFiles);
+  if (orphans.length) console.warn(`[SYNC] ${orphans.length} orphaned child record(s) quarantined (parent project missing on server + local):`, orphans);
+
+  // Advance the marker to the newest SERVER stamp we saw. No rows → stays put.
   if (maxStamp > 0) {
     await db.meta.put({ key: LAST_PULL_KEY, value: new Date(maxStamp).toISOString() }).catch(() => {});
   }
+  // Live queries (dexie-react-hooks) re-run on commit → the hierarchy rehydrates
+  // instantly, no reload.
+  console.log("[SYNC] 5. Merge complete, updating UI");
 }
 
 // ---- manual/bidirectional sync: PUSH FIRST, then pull ----------------------
@@ -384,8 +436,7 @@ export async function syncNow() {
     const pending = await db.outbox.count().catch(() => 0);
     console.log(`[SYNC] 2. Pushing outbox (items: ${pending})`);
     await flushOutbox();     // 1. PUSH local changes (no-op if empty)
-    await pullMerge();       // 2. PULL + LWW-merge (live queries rehydrate UI)
-    console.log("[SYNC] 5. Merge complete, updating UI");
+    await pullMerge();       // 2. PULL + ordered LWW-merge (logs step 5 on commit)
     return true;
   } catch (e) {
     // Surface — never swallow. Reflect in the SyncBadge too.
