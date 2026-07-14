@@ -305,18 +305,29 @@ const localStamp = (row) => row?.updated_at ?? row?.createdAt ?? 0;
 const LAST_PULL_KEY = "fcLastPulledAt";
 
 export async function pullMerge() {
-  if (!(await validSession())) return;
-  if (!(await verifyOnline())) return;
+  const session = await validSession();
+  if (!session) { console.warn("[SYNC] pull skipped — no valid session"); return; }
+  if (!(await verifyOnline())) { console.warn("[SYNC] pull skipped — offline (no real connectivity)"); return; }
+  const uid = session.user?.id;
+  console.log(`[SYNC] 3. Pulling from Supabase for user: ${uid}`);
 
   // INCREMENTAL: only rows changed since the last successful pull (tombstones
   // included — they're rows too). First sync / fresh device = full pull.
+  // The .eq("user_id") filter is for clarity/efficiency — RLS already enforces
+  // it server-side, but it documents intent and trims the payload.
   const marker = await db.meta.get(LAST_PULL_KEY).catch(() => null);
   const since = marker?.value || null;
-  let decksQ = supabase.from("fc_decks").select("id, data, updated_at, deleted");
-  let cardsQ = supabase.from("fc_cards").select("id, data, updated_at, deleted");
+  let decksQ = supabase.from("fc_decks").select("id, data, updated_at, deleted").eq("user_id", uid);
+  let cardsQ = supabase.from("fc_cards").select("id, data, updated_at, deleted").eq("user_id", uid);
   if (since) { decksQ = decksQ.gt("updated_at", since); cardsQ = cardsQ.gt("updated_at", since); }
   const [decksRes, cardsRes] = await Promise.all([decksQ, cardsQ]);
-  if (decksRes.error || cardsRes.error) return;    // stay silent; retry later
+  if (decksRes.error || cardsRes.error) {
+    const e = decksRes.error || cardsRes.error;
+    console.error(`[SYNC] ERROR: pull failed — code: ${e?.code ?? "(none)"} message: ${e?.message ?? e} details: ${e?.details ?? "(none)"}`, e);
+    setStatus("error");
+    return;
+  }
+  console.log(`[SYNC] 4. Pulled records: decks=${decksRes.data?.length || 0}, cards=${cardsRes.data?.length || 0}`);
 
   let maxStamp = 0;
   const seen = (iso) => { const t = Date.parse(iso); if (t > maxStamp) maxStamp = t; return t; };
@@ -362,14 +373,25 @@ export async function pullMerge() {
 // run two overlapping cycles.
 let syncingNow = false;
 export async function syncNow() {
-  if (syncingNow) return false;
+  if (syncingNow) return false;   // concurrency lock: mount + button can't overlap
   syncingNow = true;
   try {
     setStatus("syncing");
-    await flushOutbox();     // 1. PUSH local changes
+    // PUSH the outbox — even with 0 items — then ALWAYS pull. Never early-return
+    // on an empty outbox: that was the "clicking Sync does nothing" bug (the
+    // pull was reached, but the status flipped to idle so the spinner vanished
+    // and a silent pull failure looked like inaction).
+    const pending = await db.outbox.count().catch(() => 0);
+    console.log(`[SYNC] 2. Pushing outbox (items: ${pending})`);
+    await flushOutbox();     // 1. PUSH local changes (no-op if empty)
     await pullMerge();       // 2. PULL + LWW-merge (live queries rehydrate UI)
-    // flushOutbox already settled status (idle / retrying / error / offline).
+    console.log("[SYNC] 5. Merge complete, updating UI");
     return true;
+  } catch (e) {
+    // Surface — never swallow. Reflect in the SyncBadge too.
+    console.error(`[SYNC] ERROR: sync cycle failed — code: ${e?.code ?? "(none)"} message: ${e?.message ?? e}`, e);
+    setStatus("error");
+    return false;
   } finally {
     syncingNow = false;
   }

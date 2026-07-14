@@ -1203,21 +1203,34 @@ function Shell({ children }) {
 function SyncButton() {
   const dark = useContext(ThemeCtx);
   const reduced = useReducedMotion();
-  const [status, setStatus] = useState("idle");
-  useEffect(() => onSyncStatus((s) => setStatus(s)), []);
-  const busy = status === "syncing";
+  // Own `isSyncing` that wraps the ENTIRE push→pull→merge cycle. The previous
+  // version tied the spinner to the status bus, which flushOutbox flips to
+  // "idle" the moment the outbox is empty — so during the (slow) pull the
+  // button showed idle and looked dead. This local lock guarantees the spinner
+  // stays for the whole cycle and clears in `finally` on success AND error.
+  const [isSyncing, setIsSyncing] = useState(false);
+  async function handleSync() {
+    if (isSyncing) return;                 // guard concurrent runs (mount + click)
+    setIsSyncing(true);                    // BEFORE the first await → spinner shows
+    try {
+      console.log("[SYNC] 1. Button clicked");
+      await syncNow();                     // push (even if 0) → always pull → merge
+    } finally {
+      setIsSyncing(false);                 // clears even if syncNow throws
+    }
+  }
   return (
     <button
       type="button"
-      onClick={() => syncNow()}
-      disabled={busy}
-      aria-label="Sync now"
+      onClick={handleSync}
+      disabled={isSyncing}
+      aria-label={isSyncing ? "Syncing…" : "Sync now"}
       title="Sync now — push local changes, pull the latest from your other devices"
       className={`flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-lg border border-med-lines px-2.5 py-2 shadow-sm transition disabled:cursor-wait ${dark ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-white text-med-text hover:bg-slate-50 hover:text-med-primary"}`}
     >
-      {busy && reduced
+      {isSyncing && reduced
         ? <span className="text-xs font-medium">Syncing…</span>
-        : <RefreshCw className={`h-4 w-4 ${busy ? "animate-spin" : ""}`} aria-hidden="true" />}
+        : <RefreshCw className={`h-4 w-4 ${isSyncing ? "animate-spin" : ""}`} aria-hidden="true" />}
     </button>
   );
 }
